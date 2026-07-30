@@ -23,7 +23,7 @@ public static class EgressGuard
             return;
         }
 
-        if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri))
+        if (!Uri.TryCreate(url, UriKind.RelativeOrAbsolute, out Uri? uri) || !uri.IsAbsoluteUri)
         {
             throw new EgressBlockedException(url, "not an absolute URI");
         }

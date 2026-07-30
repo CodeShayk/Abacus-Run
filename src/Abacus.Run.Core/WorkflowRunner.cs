@@ -41,6 +41,7 @@ public sealed class WorkflowRunner
     private readonly WorkflowRunnerDependencies _deps;
     private int _currentSuperstep;
     private string? _latestCheckpointId;
+    private readonly Queue<string> _hostInvocationEvents = new();
 
     public WorkflowRunner(WorkflowRunnerDependencies dependencies)
         => _deps = dependencies ?? throw new ArgumentNullException(nameof(dependencies));
@@ -153,9 +154,17 @@ public sealed class WorkflowRunner
                     break;
 
                 case ExecutorInvokedEvent invoked:
-                    await PublishAsync(instance, WorkflowEventTypes.ExecutorInvoked,
-                        new { executorId = invoked.ExecutorId, superstep = _currentSuperstep },
-                        invoked.ExecutorId, cancellationToken).ConfigureAwait(false);
+                    if (_hostInvocationEvents.TryPeek(out string? hostExecutorId) &&
+                        string.Equals(hostExecutorId, invoked.ExecutorId, StringComparison.Ordinal))
+                    {
+                        _hostInvocationEvents.Dequeue();
+                    }
+                    else
+                    {
+                        await PublishAsync(instance, WorkflowEventTypes.ExecutorInvoked,
+                            new { executorId = invoked.ExecutorId, superstep = _currentSuperstep },
+                            invoked.ExecutorId, cancellationToken).ConfigureAwait(false);
+                    }
                     break;
 
                 case ExecutorCompletedEvent completed:
@@ -256,6 +265,12 @@ public sealed class WorkflowRunner
                 instance.WorkflowName, instance.WorkflowVersion, gates, _deps.GatePolicies, _deps.Approvals),
             Approvals = _deps.ApprovalService,
             Services = _deps.Services,
+            ExecutorInvoked = async (executorId, superstep) =>
+            {
+                _hostInvocationEvents.Enqueue(executorId);
+                await PublishAsync(instance, WorkflowEventTypes.ExecutorInvoked,
+                    new { executorId, superstep }, executorId, CancellationToken.None).ConfigureAwait(false);
+            },
             SuperstepAccessor = () => _currentSuperstep
         };
 

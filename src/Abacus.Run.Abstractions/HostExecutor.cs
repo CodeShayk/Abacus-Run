@@ -78,6 +78,9 @@ public sealed class HostExecutorRuntime
     public IApprovalCoordinator? Approvals { get; init; }
     public IServiceProvider? Services { get; init; }
 
+    /// <summary>Called when a host executor begins handling a message, before gate evaluation.</summary>
+    public Func<string, int, ValueTask>? ExecutorInvoked { get; init; }
+
     /// <summary>Ambient superstep, updated by the run loop as the engine advances.</summary>
     public Func<int>? SuperstepAccessor { get; init; }
 
@@ -115,6 +118,11 @@ public abstract class HostExecutor<TIn, TOut> : Executor<TIn, TOut>, IHostExecut
         ArgumentNullException.ThrowIfNull(context);
 
         object? input = message;
+
+        if (Runtime.ExecutorInvoked is { } executorInvoked)
+        {
+            await executorInvoked(Id, Runtime.CurrentSuperstep).ConfigureAwait(false);
+        }
 
         if (Runtime.Gates is { } gates)
         {
