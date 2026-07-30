@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
   
 jobs:
   release:  
@@ -62,12 +61,6 @@ jobs:
         run: dotnet test -c Release --no-build
         working-directory: '${{ env.working-directory }}'
 
-      - name: Pack Stable
-        run: |
-          dotnet pack src/MyLibrary/MyLibrary.csproj \
-            -c Release -o artifacts \
-            /p:PackageVersion=${{ steps.gitversion.outputs.NuGetVersionV2 }}
-
       - name: Create Tag (if missing)
         run: |
           TAG="v${{ steps.gitversion.outputs.MajorMinorPatch }}"
@@ -77,24 +70,3 @@ jobs:
             git tag "$TAG"
             git push origin "$TAG"
           fi
-
-      - name: Add GitHub Packages Source
-        run: |
-          dotnet nuget add source \
-            --username $GITHUB_ACTOR \
-            --password ${{ secrets.GITHUB_TOKEN }} \
-            --store-password-in-clear-text \
-            --name github "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
-
-      - name: Publish to GitHub Packages
-        run: dotnet nuget push "artifacts/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source "github" --skip-duplicate
-
-      - name: Publish to NuGet
-        if: ${{ startsWith(github.head_ref, 'release/')}}
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: |
-          dotnet nuget push "artifacts/*.nupkg" \
-            --api-key "$NUGET_API_KEY" \
-            --source https://api.nuget.org/v3/index.json \
-            --skip-duplicate

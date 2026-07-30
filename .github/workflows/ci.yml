@@ -1,4 +1,4 @@
-name: CI (Build, Test, Alpha Publish)
+name: CI (Build and Test)
 
 on:
   pull_request:
@@ -9,10 +9,9 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  build-test-pack:
+  build-test:
     runs-on: ubuntu-latest
     env:
       working-directory: ${{ github.workspace }}
@@ -50,27 +49,7 @@ jobs:
       - name: Build
         run: dotnet build --configuration Release --no-restore
         working-directory: '${{ env.working-directory }}'
-        
+
       - name: Test
         run: dotnet test --configuration Release --no-build --collect:"XPlat Code Coverage"
         working-directory: '${{ env.working-directory }}'
-
-      - name: Pack (Pre-release or Alpha)
-        if: ${{ steps.gitversion.outputs.PreReleaseTag != '' && github.ref_type == 'branch' && github.ref != 'refs/heads/main' }}
-        run: |
-          dotnet pack src/MyLibrary/MyLibrary.csproj \
-            -c Release -o artifacts \
-            /p:PackageVersion=${{ steps.gitversion.outputs.NuGetVersionV2 }}
-
-      - name: Add GitHub Packages Source
-        if: ${{ steps.gitversion.outputs.PreReleaseTag != '' && github.ref_type == 'branch' && github.ref != 'refs/heads/main' }}
-        run: |
-            dotnet nuget add source \
-              --username $GITHUB_ACTOR \
-              --password ${{ secrets.GITHUB_TOKEN }} \
-              --store-password-in-clear-text \
-              --name github "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
-
-      - name: Publish Alpha to GitHub Packages
-        if: ${{ steps.gitversion.outputs.PreReleaseTag != '' && github.ref_type == 'branch' && github.ref != 'refs/heads/main' }}
-        run: dotnet nuget push "artifacts/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source "github" --skip-duplicate
