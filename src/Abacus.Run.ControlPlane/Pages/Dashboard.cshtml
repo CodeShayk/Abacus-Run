@@ -1,0 +1,64 @@
+@page "/control/Dashboard"
+@model Abacus.Run.ControlPlane.Pages.DashboardModel
+@{
+    ViewData["Title"] = "Dashboard";
+}
+
+<div class="dashboard-grid">
+    <div class="metric-card">
+        <div class="metric-value" id="active-count">@Model.Metrics?.ActiveInstances</div>
+        <div class="metric-label">Active</div>
+    </div>
+    <div class="metric-card completed">
+        <div class="metric-value" id="completed-count">@Model.Metrics?.CompletedInstances</div>
+        <div class="metric-label">Completed</div>
+    </div>
+    <div class="metric-card failed">
+        <div class="metric-value" id="failed-count">@Model.Metrics?.FailedInstances</div>
+        <div class="metric-label">Failed</div>
+    </div>
+    <div class="metric-card approval">
+        <div class="metric-value" id="approval-count">@Model.Metrics?.AwaitingApproval</div>
+        <div class="metric-label">Awaiting Approval</div>
+    </div>
+    <div class="metric-card pending">
+        <div class="metric-value" id="pending-count">@Model.Metrics?.PendingInstances</div>
+        <div class="metric-label">Pending</div>
+    </div>
+    <div class="metric-card throughput">
+        <div class="metric-value" id="throughput-value">@Model.Metrics?.ThroughputPerMinute.ToString("F1")</div>
+        <div class="metric-label">Throughput/min</div>
+    </div>
+</div>
+
+<section class="dashboard-section">
+    <h2>Recent Instances</h2>
+    @if (Model.RecentInstances?.Items.Count > 0)
+    {
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Instance ID</th>
+                    <th>Workflow</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var instance in Model.RecentInstances.Items.Take(10))
+                {
+                    <tr>
+                        <td><a href="/control/Instances/Detail?id=@instance.InstanceId">@instance.InstanceId[..12]…</a></td>
+                        <td>@instance.WorkflowName</td>
+                        <td><partial name="Shared/_StatusBadge" model="@instance.Status.ToString()" /></td>
+                        <td>@instance.CreatedAt.ToString("g")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+    else
+    {
+        <p class="empty-state">No instances yet.</p>
+    }
+</section>

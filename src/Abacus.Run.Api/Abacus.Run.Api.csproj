@@ -5,5 +5,7 @@
   <ItemGroup>
     <ProjectReference Include="../Abacus.Run.Middleware/Abacus.Run.Middleware.csproj" />
     <ProjectReference Include="../Abacus.Run.Persistence/Abacus.Run.Persistence.csproj" />
+    <ProjectReference Include="../Abacus.Run.Dispatch/Abacus.Run.Dispatch.csproj" />
+    <ProjectReference Include="../Abacus.Run.ControlPlane/Abacus.Run.ControlPlane.csproj" />
   </ItemGroup>
 </Project>

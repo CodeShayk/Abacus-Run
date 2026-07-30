@@ -1,6 +1,7 @@
 using Abacus.Run.Abstractions;
 using Abacus.Run.Api;
 using Abacus.Run.Core;
+using Abacus.Run.Dispatch;
 using Abacus.Run.Persistence;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;

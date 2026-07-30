@@ -1,0 +1,223 @@
+/* Abacus Run Control Plane — site.css
+ * Node state classes, layout, data tables, status badges, graph panel.
+ */
+
+:root {
+    --color-bg: #f8f9fa;
+    --color-surface: #ffffff;
+    --color-border: #dee2e6;
+    --color-text: #212529;
+    --color-text-muted: #6c757d;
+    --color-primary: #0d6efd;
+    --color-success: #198754;
+    --color-danger: #dc3545;
+    --color-warning: #ffc107;
+    --color-info: #0dcaf0;
+    --sidebar-width: 220px;
+    --radius: 6px;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+    font-size: 14px;
+    color: var(--color-text);
+    background: var(--color-bg);
+}
+
+/* ─── Layout ────────────────────────────────────────────────────────── */
+
+.layout { display: flex; min-height: 100vh; }
+
+.sidebar {
+    width: var(--sidebar-width);
+    background: #1e293b;
+    color: #e2e8f0;
+    padding: 1rem 0;
+    flex-shrink: 0;
+}
+
+.sidebar-brand { padding: 0 1rem 1rem; border-bottom: 1px solid #334155; }
+.sidebar-brand h2 { margin: 0; font-size: 1.1rem; }
+.sidebar-brand .version { font-size: 0.75rem; color: #94a3b8; }
+
+.sidebar-nav { list-style: none; padding: 0.5rem 0; margin: 0; }
+.sidebar-nav li a {
+    display: block; padding: 0.6rem 1rem; color: #cbd5e1;
+    text-decoration: none; transition: background 0.15s;
+}
+.sidebar-nav li a:hover { background: #334155; }
+.sidebar-nav li a.active { background: var(--color-primary); color: #fff; }
+
+.main-content { flex: 1; padding: 1.5rem 2rem; overflow-x: auto; }
+.page-header h1 { margin: 0 0 1rem; font-size: 1.5rem; }
+
+/* ─── Tables ────────────────────────────────────────────────────────── */
+
+.data-table {
+    width: 100%; border-collapse: collapse; background: var(--color-surface);
+    border-radius: var(--radius); overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+.data-table th, .data-table td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid var(--color-border); }
+.data-table th { background: #f1f3f5; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--color-text-muted); }
+.data-table tbody tr:hover { background: #f8f9fa; }
+.data-table a { color: var(--color-primary); text-decoration: none; }
+.data-table a:hover { text-decoration: underline; }
+
+/* ─── Status Badges ─────────────────────────────────────────────────── */
+
+.badge {
+    display: inline-block; padding: 0.2em 0.6em; border-radius: 10px;
+    font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+.badge-running { background: #dbeafe; color: #1d4ed8; }
+.badge-pending { background: #e2e8f0; color: #475569; }
+.badge-completed { background: #d1fae5; color: #065f46; }
+.badge-failed { background: #fee2e2; color: #991b1b; }
+.badge-dead-stopped { background: #fce7f3; color: #9d174d; }
+.badge-cancelled { background: #fef3c7; color: #92400e; }
+.badge-awaiting-approval { background: #fef9c3; color: #854d0e; }
+.badge-awaiting-input { background: #e0e7ff; color: #3730a3; }
+.badge-suspended { background: #f3e8ff; color: #6b21a8; }
+.badge-retry { background: #fed7aa; color: #9a3412; }
+
+/* ─── Buttons ───────────────────────────────────────────────────────── */
+
+.btn {
+    display: inline-block; padding: 0.45rem 1rem; border: none; border-radius: var(--radius);
+    font-size: 0.85rem; font-weight: 500; cursor: pointer; text-decoration: none;
+    transition: opacity 0.15s;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary { background: var(--color-primary); color: #fff; }
+.btn-secondary { background: #e2e8f0; color: var(--color-text); }
+.btn-danger { background: var(--color-danger); color: #fff; }
+.btn-success { background: var(--color-success); color: #fff; }
+.btn-sm { padding: 0.25rem 0.6rem; font-size: 0.78rem; }
+
+/* ─── Dashboard ─────────────────────────────────────────────────────── */
+
+.dashboard-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 1rem; margin-bottom: 2rem;
+}
+.metric-card {
+    background: var(--color-surface); border-radius: var(--radius); padding: 1.2rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06); text-align: center;
+}
+.metric-value { font-size: 2rem; font-weight: 700; color: var(--color-primary); }
+.metric-card.completed .metric-value { color: var(--color-success); }
+.metric-card.failed .metric-value { color: var(--color-danger); }
+.metric-card.approval .metric-value { color: #854d0e; }
+.metric-label { font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.3rem; }
+.dashboard-section { margin-top: 2rem; }
+.dashboard-section h2 { font-size: 1.1rem; margin-bottom: 1rem; }
+
+/* ─── Filters ───────────────────────────────────────────────────────── */
+
+.filter-bar { margin-bottom: 1rem; }
+.filter-form { display: flex; gap: 1rem; align-items: end; flex-wrap: wrap; }
+.filter-group label { display: block; font-size: 0.78rem; color: var(--color-text-muted); margin-bottom: 0.25rem; }
+.filter-group input, .filter-group select {
+    padding: 0.4rem 0.6rem; border: 1px solid var(--color-border); border-radius: var(--radius);
+    font-size: 0.85rem;
+}
+
+.pagination { display: flex; align-items: center; gap: 1rem; margin-top: 1rem; }
+.page-info { font-size: 0.85rem; color: var(--color-text-muted); }
+
+.bulk-actions { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--color-border); }
+.bulk-actions label { font-size: 0.85rem; margin-right: 0.5rem; }
+.bulk-actions input[type="number"] { width: 80px; padding: 0.35rem; border: 1px solid var(--color-border); border-radius: var(--radius); }
+
+/* ─── Detail ────────────────────────────────────────────────────────── */
+
+.detail-header {
+    display: flex; gap: 2rem; flex-wrap: wrap;
+    background: var(--color-surface); padding: 1.2rem; border-radius: var(--radius);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06); margin-bottom: 1.5rem;
+}
+.detail-meta dl { display: grid; grid-template-columns: auto 1fr; gap: 0.3rem 1rem; margin: 0; }
+.detail-meta dt { font-weight: 600; font-size: 0.8rem; color: var(--color-text-muted); }
+.detail-meta dd { margin: 0; }
+.terminal-reason { color: var(--color-danger); }
+
+.detail-actions { flex-shrink: 0; }
+.action-group { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.action-reason input { padding: 0.35rem 0.6rem; border: 1px solid var(--color-border); border-radius: var(--radius); width: 300px; }
+
+.inline-form { display: inline-flex; gap: 0.4rem; align-items: center; }
+.inline-input { padding: 0.3rem 0.5rem; border: 1px solid var(--color-border); border-radius: var(--radius); width: 160px; }
+
+/* ─── Tabs ──────────────────────────────────────────────────────────── */
+
+.tab-nav { display: flex; gap: 0; border-bottom: 2px solid var(--color-border); margin-bottom: 1rem; }
+.tab {
+    padding: 0.6rem 1.2rem; border: none; background: none; cursor: pointer;
+    font-size: 0.9rem; color: var(--color-text-muted); border-bottom: 2px solid transparent;
+    margin-bottom: -2px; transition: color 0.15s, border-color 0.15s;
+}
+.tab:hover { color: var(--color-text); }
+.tab.active { color: var(--color-primary); border-bottom-color: var(--color-primary); font-weight: 600; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* ─── Graph Panel ───────────────────────────────────────────────────── */
+
+.graph-panel { background: var(--color-surface); border-radius: var(--radius); padding: 1rem; }
+.graph-container { overflow: auto; max-height: 500px; }
+.graph-container .mermaid { min-height: 200px; }
+.graph-legend { display: flex; gap: 1rem; margin-top: 0.8rem; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 0.3rem; font-size: 0.78rem; color: var(--color-text-muted); }
+.node-dot { width: 10px; height: 10px; border-radius: 50%; }
+.node-dot.pending { background: #94a3b8; }
+.node-dot.executing { background: var(--color-primary); }
+.node-dot.completed { background: var(--color-success); }
+.node-dot.failed { background: var(--color-danger); }
+.node-dot.awaiting-approval { background: var(--color-warning); }
+.node-dot.skipped { background: #d1d5db; }
+
+/* Live node state classes applied to Mermaid SVG nodes */
+.mermaid .node.executing rect,
+.mermaid .node.executing polygon { fill: #dbeafe !important; stroke: #2563eb !important; stroke-width: 2px; }
+.mermaid .node.completed rect,
+.mermaid .node.completed polygon { fill: #d1fae5 !important; stroke: #059669 !important; }
+.mermaid .node.failed rect,
+.mermaid .node.failed polygon { fill: #fee2e2 !important; stroke: #dc2626 !important; }
+.mermaid .node.awaiting-approval rect,
+.mermaid .node.awaiting-approval polygon { fill: #fef3c7 !important; stroke: #d97706 !important; }
+.mermaid .node.skipped rect,
+.mermaid .node.skipped polygon { fill: #f1f5f9 !important; stroke: #94a3b8 !important; opacity: 0.6; }
+
+.mermaid .edgePath.traversed path { stroke: var(--color-primary) !important; stroke-width: 2.5px; }
+
+/* ─── Banners & Prompts ─────────────────────────────────────────────── */
+
+.stale-banner {
+    background: #fef3c7; border: 1px solid #fbbf24; color: #92400e;
+    padding: 0.6rem 1rem; border-radius: var(--radius); margin-bottom: 1rem;
+    font-size: 0.85rem;
+}
+.approval-prompt {
+    background: #dbeafe; border: 1px solid #60a5fa; color: #1e40af;
+    padding: 0.6rem 1rem; border-radius: var(--radius); margin-bottom: 1rem;
+}
+.toast {
+    position: fixed; top: 1rem; right: 1rem; z-index: 1000;
+    background: #1e293b; color: #fff; padding: 0.8rem 1.2rem; border-radius: var(--radius);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15); display: flex; gap: 1rem; align-items: center;
+    animation: slideIn 0.3s ease-out;
+}
+.toast-close { background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem; }
+@keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+
+/* ─── Utilities ─────────────────────────────────────────────────────── */
+
+.empty-state { color: var(--color-text-muted); font-style: italic; padding: 2rem; text-align: center; }
+.json-block { background: #f1f5f9; padding: 1rem; border-radius: var(--radius); overflow-x: auto; font-family: monospace; font-size: 0.82rem; white-space: pre-wrap; }
+.event-type { font-family: monospace; font-size: 0.82rem; }
+code { background: #f1f5f9; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.85em; }

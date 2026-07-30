@@ -3,6 +3,9 @@
     <Project Path="src/Abacus.Run.Abstractions/Abacus.Run.Abstractions.csproj" />
     <Project Path="src/Abacus.Run.Api/Abacus.Run.Api.csproj" />
     <Project Path="src/Abacus.Run.Core/Abacus.Run.Core.csproj" />
+    <Project Path="src/Abacus.Run.ControlPlane/Abacus.Run.ControlPlane.csproj" />
+    <Project Path="src/Abacus.Run.Dispatch/Abacus.Run.Dispatch.csproj" />
+    <Project Path="src/Abacus.Run.EventBus/Abacus.Run.EventBus.csproj" />
     <Project Path="src/Abacus.Run.Executors/Abacus.Run.Executors.csproj" />
     <Project Path="src/Abacus.Run.Middleware/Abacus.Run.Middleware.csproj" />
     <Project Path="src/Abacus.Run.Persistence/Abacus.Run.Persistence.csproj" />
@@ -10,5 +13,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Abacus.Run.IntegrationTests/Abacus.Run.IntegrationTests.csproj" />
     <Project Path="tests/Abacus.Run.UnitTests/Abacus.Run.UnitTests.csproj" />
+    <Project Path="tests/Abacus.Run.ChaosTests/Abacus.Run.ChaosTests.csproj" />
+    <Project Path="tests/Abacus.Run.LoadTests/Abacus.Run.LoadTests.csproj" />
   </Folder>
 </Solution>

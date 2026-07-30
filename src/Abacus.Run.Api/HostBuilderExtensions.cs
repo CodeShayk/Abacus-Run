@@ -1,7 +1,9 @@
 using System.Text.Json;
 using Abacus.Run.Abstractions;
 using Abacus.Run.Abstractions.Middleware;
+using Abacus.Run.ControlPlane;
 using Abacus.Run.Core;
+using Abacus.Run.Dispatch;
 using Abacus.Run.Middleware;
 using Abacus.Run.Persistence;
 using Microsoft.Agents.AI.Workflows.Checkpointing;
@@ -72,8 +74,19 @@ public sealed class WorkflowHostBuilder
     /// <summary>Runs the dispatcher and the expiry sweeper in this process.</summary>
     public WorkflowHostBuilder AddBackgroundServices()
     {
+        Services.TryAddSingleton<LeaseManager>();
         Services.AddHostedService(sp => sp.GetRequiredService<DispatcherService>());
         Services.AddHostedService<ExpirySweeperService>();
+        Services.AddHostedService<RetentionService>();
+        Services.AddSingleton<DrainService>();
+        Services.AddHostedService(sp => sp.GetRequiredService<DrainService>());
+        return this;
+    }
+
+    /// <summary>Registers the ControlPlane Razor Pages UI.</summary>
+    public WorkflowHostBuilder AddControlPlane(string? apiBaseUrl = null)
+    {
+        Services.AddControlPlane(apiBaseUrl);
         return this;
     }
 }

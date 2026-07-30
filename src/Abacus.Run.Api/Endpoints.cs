@@ -52,8 +52,32 @@ public static class Endpoints
         MapEvents(app);
         MapControl(app);
         MapApprovals(app);
+        MapDiagnostics(app);
 
         return app;
+    }
+
+    private static void MapDiagnostics(IEndpointRouteBuilder app)
+    {
+        app.MapGet("/diagnostics/metrics", async (IInstanceStore instances, IApprovalStore approvals, CancellationToken ct) =>
+        {
+            Page<WorkflowInstance> active = await instances.QueryAsync(new InstanceQuery { Statuses = [InstanceStatus.Running] }, ct);
+            Page<WorkflowInstance> completed = await instances.QueryAsync(new InstanceQuery { Statuses = [InstanceStatus.Completed] }, ct);
+            Page<WorkflowInstance> failed = await instances.QueryAsync(new InstanceQuery { Statuses = [InstanceStatus.Failed, InstanceStatus.DeadStopped] }, ct);
+            Page<WorkflowInstance> pending = await instances.QueryAsync(new InstanceQuery { Statuses = [InstanceStatus.Pending, InstanceStatus.RetryScheduled, InstanceStatus.Dispatchable] }, ct);
+            IReadOnlyList<ApprovalRequest> pendingApprovals = await approvals.QueryPendingAsync(null, null, 1000, ct);
+
+            return Results.Ok(new
+            {
+                activeInstances = active.Total,
+                completedInstances = completed.Total,
+                failedInstances = failed.Total,
+                awaitingApproval = pendingApprovals.Count,
+                pendingInstances = pending.Total,
+                throughputPerMinute = 0.0,
+                errorRate = 0.0
+            });
+        });
     }
 
     private static void MapCatalog(IEndpointRouteBuilder app)

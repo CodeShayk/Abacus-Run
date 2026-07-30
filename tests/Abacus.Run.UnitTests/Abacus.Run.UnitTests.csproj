@@ -19,6 +19,7 @@
     <ProjectReference Include="../../src/Abacus.Run.Executors/Abacus.Run.Executors.csproj" />
     <ProjectReference Include="../../src/Abacus.Run.Middleware/Abacus.Run.Middleware.csproj" />
     <ProjectReference Include="../../src/Abacus.Run.Persistence/Abacus.Run.Persistence.csproj" />
+    <ProjectReference Include="../../src/Abacus.Run.Dispatch/Abacus.Run.Dispatch.csproj" />
     <ProjectReference Include="../../src/Abacus.Run.Api/Abacus.Run.Api.csproj" />
   </ItemGroup>
 </Project>

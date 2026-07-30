@@ -1,0 +1,22 @@
+@* Status badge partial: color-coded by instance status (§12.1) *@
+@model string
+
+@{
+    string cssClass = Model switch
+    {
+        "Running" => "badge badge-running",
+        "Pending" => "badge badge-pending",
+        "Completed" => "badge badge-completed",
+        "Failed" => "badge badge-failed",
+        "DeadStopped" => "badge badge-dead-stopped",
+        "Cancelled" => "badge badge-cancelled",
+        "AwaitingApproval" => "badge badge-awaiting-approval",
+        "AwaitingInput" => "badge badge-awaiting-input",
+        "Suspended" => "badge badge-suspended",
+        "RetryScheduled" => "badge badge-retry",
+        "Dispatchable" => "badge badge-pending",
+        _ => "badge"
+    };
+}
+
+<span class="@cssClass" aria-label="Status: @Model">@Model</span>

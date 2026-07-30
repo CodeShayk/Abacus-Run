@@ -1,4 +1,5 @@
 using Abacus.Run.Api;
+using Abacus.Run.ControlPlane;
 using Abacus.Run.Core;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
@@ -12,14 +13,19 @@ builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
 builder.Services
     .AddWorkflowHost(builder.Configuration)
     .AddBuiltInMiddleware()
-    .AddBackgroundServices();
+    .AddBackgroundServices()
+    .AddControlPlane();
 
 WebApplication app = builder.Build();
 
 app.UseExceptionHandler();
 app.UseStatusCodePages();
 
+app.UseStaticFiles();
+app.UseRouting();
+
 app.MapWorkflowApi();
+app.MapControlPlane("/control");
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
 app.MapGet("/health/ready", () => Results.Ok(new { status = "ready" }));
 

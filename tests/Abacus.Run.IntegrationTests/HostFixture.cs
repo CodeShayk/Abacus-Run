@@ -194,7 +194,16 @@ public sealed class HostFixture : WebApplicationFactory<Program>
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
-        => builder.UseSetting("WorkflowHost:Approvals:SweepIntervalSeconds", "1");
+    {
+        builder.UseSetting("WorkflowHost:Approvals:SweepIntervalSeconds", "1");
+        builder.ConfigureServices(services =>
+        {
+            services.AddHttpClient<Abacus.Run.ControlPlane.Services.WorkflowApiClient>(client =>
+            {
+                client.BaseAddress = new Uri("http://localhost");
+            }).ConfigurePrimaryHttpMessageHandler(() => Server.CreateHandler());
+        });
+    }
 
     public T Resolve<T>() where T : notnull => Services.GetRequiredService<T>();
 
