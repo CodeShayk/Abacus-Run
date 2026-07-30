@@ -147,7 +147,10 @@ public sealed class OutboundCallCaptureHandler : DelegatingHandler
         ExecutorInvocationContext? context = _contextAccessor();
         var handle = new OutboundCallHandle(request);
 
-        context?.Items[MiddlewareContextKeys.OutboundCall] = handle;
+        if (context is not null)
+        {
+            context.Items[MiddlewareContextKeys.OutboundCall] = handle;
+        }
 
         if (handle.IsShortCircuited)
         {

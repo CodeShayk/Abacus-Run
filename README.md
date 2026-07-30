@@ -25,6 +25,21 @@ Start the HTTP host:
 dotnet run --project src/Abacus.Run.Api/Abacus.Run.Api.csproj
 ```
 
+### Run the container
+
+Build and run the API image locally:
+
+```bash
+docker build -t abacus-run .
+docker run --rm -p 8080:8080 abacus-run
+```
+
+The `Container (Publish to GHCR)` workflow publishes `ghcr.io/codeshayk/abacus-run` on pushes to `master`, `v*` tags, and manual workflow dispatch. It uses the workflow's `GITHUB_TOKEN`; no additional registry secret is required. Pull the published image with:
+
+```bash
+docker pull ghcr.io/codeshayk/abacus-run:latest
+```
+
 The host exposes liveness and readiness probes:
 
 ```bash
