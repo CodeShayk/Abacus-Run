@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Abacus.Run.Abstractions/Abacus.Run.Abstractions.csproj" />
+    <Project Path="src/Abacus.Run.Api/Abacus.Run.Api.csproj" />
+    <Project Path="src/Abacus.Run.Core/Abacus.Run.Core.csproj" />
+    <Project Path="src/Abacus.Run.Executors/Abacus.Run.Executors.csproj" />
+    <Project Path="src/Abacus.Run.Middleware/Abacus.Run.Middleware.csproj" />
+    <Project Path="src/Abacus.Run.Persistence/Abacus.Run.Persistence.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Abacus.Run.IntegrationTests/Abacus.Run.IntegrationTests.csproj" />
+    <Project Path="tests/Abacus.Run.UnitTests/Abacus.Run.UnitTests.csproj" />
+  </Folder>
+</Solution>

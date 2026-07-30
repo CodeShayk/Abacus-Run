@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../Abacus.Run.Executors/Abacus.Run.Executors.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,10 @@
+<Project>
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
+
+  <ItemGroup>
+    <!-- Internal helpers (host matching, IP classification, parsers) are unit-tested directly
+         rather than only through their public callers. -->
+    <InternalsVisibleTo Include="Abacus.Run.UnitTests" />
+    <InternalsVisibleTo Include="Abacus.Run.IntegrationTests" />
+  </ItemGroup>
+</Project>

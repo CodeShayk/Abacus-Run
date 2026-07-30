@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <RootNamespace>Abacus.Run.Api</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Abacus.Run.Middleware/Abacus.Run.Middleware.csproj" />
+    <ProjectReference Include="../Abacus.Run.Persistence/Abacus.Run.Persistence.csproj" />
+  </ItemGroup>
+</Project>
