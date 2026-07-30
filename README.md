@@ -1,69 +1,131 @@
-# MyLibrary
+# Abacus Run
 
-Example .NET library template with:
-- GitVersion-based semantic versioning
-- Alpha prereleases on feature/fix branches (published to GitHub Packages)
-- Stable releases on main (published to GitHub + NuGet)
-- Automated tagging
+Abacus Run is a .NET workflow runtime and HTTP host for durable, observable workflow instances. It provides workflow version resolution, bounded concurrency, retries, checkpoints, approvals, event history, server-sent events, cancellation, reruns, and redacted audit/logging surfaces.
 
-## Branch Strategy
+The runtime is built on Microsoft Agent Framework workflows. Stores are exposed through interfaces so the in-memory implementation can be replaced by durable persistence without changing workflow definitions.
 
-| Branch Pattern | Version Tag | Publishes To                  |
-| -------------- | ----------- | ----------------------------- |
-| feature/*      | -alpha.x    | GitHub Packages only          |
-| fix/*          | -alpha.x    | GitHub Packages only          |
-| chore/*        | -alpha.x    | GitHub Packages only          |
-| main (merge)   | stable      | GitHub + NuGet (tag created)  |
-| hotfix/*       | patch stable after merge | GitHub + NuGet |
+## Requirements
 
-## Local Dev
+- .NET 9 SDK
+- Access to the configured NuGet feeds in `nuget.config`
+
+## Quick Start
+
+Build and test the repository from its root:
 
 ```bash
-dotnet build
-dotnet test
+dotnet restore Abacus.Run.slnx
+dotnet build Abacus.Run.slnx
+dotnet test Abacus.Run.slnx
 ```
 
-## Releasing
+Start the HTTP host:
 
-Merge your PR into main. The `release.yml` workflow will:
-1. Compute version (e.g. 1.2.0)
-2. Tag `v1.2.0`
-3. Publish package to GitHub + NuGet
-
-## Script
-```
-#!/usr/bin/env bash
-# Local bootstrap script: create a new repo from this template.
-# Requires: gh CLI (authenticated), git, dotnet.
-
-set -euo pipefail
-
-if [ $# -lt 2 ]; then
-  echo "Usage: ./script/init-local.sh <org> <NewRepoName>"
-  exit 1
-fi
-
-ORG="$1"
-REPO="$2"
-
-echo "Creating repo $ORG/$REPO..."
-gh repo create "$ORG/$REPO" --public --description "New .NET library $REPO" --disable-wiki --confirm
-
-echo "Cloning..."
-git clone "https://github.com/$ORG/$REPO.git"
-cd "$REPO"
-
-echo "Copying template contents (assuming this script is run from template root)..."
-# Adjust the path to template root if needed
-TEMPLATE_ROOT="$(cd .. && pwd)"
-
-rsync -av --exclude ".git" "$TEMPLATE_ROOT/" .
-
-git add .
-git commit -m "chore: initial template import"
-git push origin main
-
-echo "Done. Set secrets NUGET_API_KEY in GitHub -> Settings -> Secrets."
+```bash
+dotnet run --project src/Abacus.Run.Api/Abacus.Run.Api.csproj
 ```
 
-Pre-releases for feature branches appear as `1.3.0-alpha.5`.
+The host exposes liveness and readiness probes:
+
+```bash
+curl http://localhost:5000/health/live
+curl http://localhost:5000/health/ready
+```
+
+The API project is intentionally a host shell. Register one or more workflow definitions in the application's service configuration before starting instances:
+
+```csharp
+builder.Services
+    .AddWorkflowHost(builder.Configuration)
+    .AddWorkflow<OrderWorkflow>()
+    .AddBuiltInMiddleware()
+    .AddBackgroundServices();
+```
+
+`OrderWorkflow` must implement `IWorkflowDefinition` or `IWorkflowDefinition<TContext, TResult>`. Use `WorkflowBuildContext.Node(...)` to attach host executors and declare approval gates.
+
+## API Surface
+
+### Workflow catalog
+
+- `GET /workflows`
+- `GET /workflows/{name}`
+- `POST /workflows/{name}/instances`
+
+The start endpoint accepts an optional `version` query parameter and supports `Idempotency-Key` and `Prefer: wait=<seconds>` headers.
+
+### Instance operations
+
+- `GET /instances/{id}`
+- `GET /instances`
+- `GET /instances/{id}/graph`
+- `GET /instances/{id}/logs`
+- `GET /instances/{id}/checkpoints`
+- `GET /instances/{id}/events/history`
+- `GET /instances/{id}/events`
+- `POST /instances/{id}/cancel`
+- `POST /instances/{id}/retry`
+- `POST /instances/{id}/rerun`
+- `POST /instances/{id}/suspend`
+- `POST /instances/{id}/resume`
+
+`GET /instances/{id}/events` is an SSE stream. Instance queries support status, workflow, correlation ID, limit, and offset filters.
+
+### Approvals
+
+- `GET /approvals`
+- `GET /approvals/{approvalId}`
+- `GET /instances/{id}/approvals`
+- `POST /approvals/{approvalId}/decision`
+
+## Configuration
+
+Options are read from the `WorkflowHost` configuration section. For example:
+
+```json
+{
+  "WorkflowHost": {
+    "MaxConcurrentInstances": 100,
+    "ClaimBatchSize": 10,
+    "Retry": {
+      "MaxAttempts": 5,
+      "MaxLifetimeHours": 24
+    },
+    "Checkpoint": {
+      "Cadence": "SuperStep"
+    },
+    "Sse": {
+      "HeartbeatSeconds": 15
+    },
+    "Egress": {
+      "Enforce": true,
+      "AllowedHosts": ["api.example.com"]
+    }
+  }
+}
+```
+
+The default host uses in-memory instance, event, log, approval, checkpoint, blob, and audit stores. Treat this configuration as development-oriented until durable store implementations are supplied.
+
+## Project Layout
+
+| Project | Responsibility |
+| --- | --- |
+| `Abacus.Run.Abstractions` | Workflow definitions, executors, approvals, instances, and middleware contracts |
+| `Abacus.Run.Core` | Registry, runner, dispatch, retries, gates, events, redaction, and host options |
+| `Abacus.Run.Executors` | API, LLM, template, and supporting executors |
+| `Abacus.Run.Middleware` | Built-in workflow and executor middleware, including drift monitoring |
+| `Abacus.Run.Persistence` | In-memory stores and checkpoint overflow handling |
+| `Abacus.Run.Api` | ASP.NET Core host, endpoints, instance control, and SSE |
+| `tests/Abacus.Run.UnitTests` | Unit coverage for runtime behavior |
+| `tests/Abacus.Run.IntegrationTests` | HTTP and end-to-end host coverage |
+
+## Test Coverage
+
+Run the full suite with:
+
+```bash
+dotnet test Abacus.Run.slnx --no-restore
+```
+
+The integration tests exercise the real ASP.NET Core host and its HTTP endpoints; unit tests cover the runtime components and stores independently.
