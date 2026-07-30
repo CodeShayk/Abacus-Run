@@ -1,0 +1,55 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36408.4
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{02EA681E-C7D8-13C7-8484-4AC65E1B71E8}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{3335C1A3-582F-49A2-BEB5-06BFFDED6B5B}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = ".github", ".github", "{0C111405-B10C-4C80-81B7-575210C0BE47}"
+	ProjectSection(SolutionItems) = preProject
+		.github\workflows\ci.yml = .github\workflows\ci.yml
+		.github\workflows\release.yml = .github\workflows\release.yml
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "misc", "misc", "{11FFA13F-539E-4B09-A2E2-4F80F4857F30}"
+	ProjectSection(SolutionItems) = preProject
+		.gitignore = .gitignore
+		Directory.Build.props = Directory.Build.props
+		GitVersion.yml = GitVersion.yml
+		LICENSE = LICENSE
+		nuget.config = nuget.config
+		README.md = README.md
+	EndProjectSection
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MyLibrary", "src\MyLibrary\MyLibrary.csproj", "{6C551900-944F-2C98-0A0F-F58A5DA9B2EF}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MyLibrary.Tests", "tests\MyLibrary.Tests\MyLibrary.Tests.csproj", "{AE960517-0FA4-0267-2173-0D04C8D0C427}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{6C551900-944F-2C98-0A0F-F58A5DA9B2EF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6C551900-944F-2C98-0A0F-F58A5DA9B2EF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6C551900-944F-2C98-0A0F-F58A5DA9B2EF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6C551900-944F-2C98-0A0F-F58A5DA9B2EF}.Release|Any CPU.Build.0 = Release|Any CPU
+		{AE960517-0FA4-0267-2173-0D04C8D0C427}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AE960517-0FA4-0267-2173-0D04C8D0C427}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AE960517-0FA4-0267-2173-0D04C8D0C427}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AE960517-0FA4-0267-2173-0D04C8D0C427}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{6C551900-944F-2C98-0A0F-F58A5DA9B2EF} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{AE960517-0FA4-0267-2173-0D04C8D0C427} = {3335C1A3-582F-49A2-BEB5-06BFFDED6B5B}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {2F583806-7DCB-4F41-9ABC-1572C0A40C6B}
+	EndGlobalSection
+EndGlobal

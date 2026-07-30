@@ -1,0 +1,76 @@
+name: CI (Build, Test, Alpha Publish)
+
+on:
+  pull_request:
+    branches: ["**"]
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-test-pack:
+    runs-on: ubuntu-latest
+    env:
+      working-directory: ${{ github.workspace }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # GitVersion needs full history / tags
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Install GitVersion
+        uses: gittools/actions/gitversion/setup@v0.9.15
+        with:
+          versionSpec: 5.x
+
+      - name: Determine Version
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@v0.9.15
+        with:
+          useConfigFile: true
+
+      - name: Display Version
+        run: |
+          echo "NuGetVersion: ${{ steps.gitversion.outputs.NuGetVersionV2 }}"
+          echo "PreReleaseTag: ${{ steps.gitversion.outputs.PreReleaseTag }}"
+
+      - name: Restore
+        run: dotnet restore
+        working-directory: '${{ env.working-directory }}'
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+        working-directory: '${{ env.working-directory }}'
+        
+      - name: Test
+        run: dotnet test --configuration Release --no-build --collect:"XPlat Code Coverage"
+        working-directory: '${{ env.working-directory }}'
+
+      - name: Pack (Pre-release or Alpha)
+        if: ${{ steps.gitversion.outputs.PreReleaseTag != '' && github.ref_type == 'branch' && github.ref != 'refs/heads/main' }}
+        run: |
+          dotnet pack src/MyLibrary/MyLibrary.csproj \
+            -c Release -o artifacts \
+            /p:PackageVersion=${{ steps.gitversion.outputs.NuGetVersionV2 }}
+
+      - name: Add GitHub Packages Source
+        if: ${{ steps.gitversion.outputs.PreReleaseTag != '' && github.ref_type == 'branch' && github.ref != 'refs/heads/main' }}
+        run: |
+            dotnet nuget add source \
+              --username $GITHUB_ACTOR \
+              --password ${{ secrets.GITHUB_TOKEN }} \
+              --store-password-in-clear-text \
+              --name github "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
+      - name: Publish Alpha to GitHub Packages
+        if: ${{ steps.gitversion.outputs.PreReleaseTag != '' && github.ref_type == 'branch' && github.ref != 'refs/heads/main' }}
+        run: dotnet nuget push "artifacts/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source "github" --skip-duplicate

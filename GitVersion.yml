@@ -1,0 +1,35 @@
+next-version: 1.0.0
+tag-prefix: '[vV]'
+mode: ContinuousDeployment
+branches:
+  master:
+    regex: ^master$|^main$
+    tag: ''
+    source-branches: ['develop']
+  release:
+    mode: ContinuousDelivery
+    tag: beta
+    increment: Minor
+    prevent-increment-of-merged-branch-version: true
+    source-branches: ['master', 'develop']
+  pre-release:
+    regex: ^pre-release$|^pre-release/.*
+    tag: alpha
+    increment: Minor
+    prevent-increment-of-merged-branch-version: true
+    source-branches: ['master', 'develop']
+  develop:
+    regex: ^develop$|^dev$
+    tag: beta
+    increment: Minor
+    source-branches: ['master']
+  pull-request:
+    tag: beta
+    regex: ^(pull|pull\-requests|pr)[/-]
+    source-branches: ['master', 'develop', 'release', 'pre-release']
+  feature:
+    tag: '{BranchName}'
+    increment: Inherit
+    source-branches: ['master', 'develop', 'release']
+ignore:
+  sha: []
