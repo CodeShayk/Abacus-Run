@@ -21,8 +21,18 @@ dotnet nuget add source https://nuget.pkg.github.com/CodeShayk/index.json   --na
 ```
 
 The package is the headless framework only; `Abacus.Run.Service` is the reference host and is not
-published. The `Package (Publish to GitHub Packages)` workflow publishes on `v*` tags and on manual
-dispatch.
+published.
+
+Two workflows publish it:
+
+| Workflow | Trigger | Version |
+| --- | --- | --- |
+| `CI (Build, Test and Publish)` | push to `master` | `<gitversion>-ci.<run>` prerelease |
+| `Package (Publish to GitHub Packages)` | `v*` tag or manual dispatch | stable, from the tag or project file |
+
+Pull requests and feature branches build and test but never publish. CI builds carry a `-ci.<run>`
+suffix so they sort below the stable release and a plain version number always means "tagged
+release".
 
 ## Requirements
 

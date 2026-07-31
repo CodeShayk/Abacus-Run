@@ -734,11 +734,22 @@ Packaging is declared in `src/Abacus.Run/Abacus.Run.csproj`. The root `Directory
 in. The package embeds its own README and the MIT licence, ships XML documentation, and produces a
 `.snupkg` symbol package alongside.
 
-Publishing runs from `.github/workflows/publish-package.yml` on `v*` tags or manual dispatch. It
-builds, runs the full test suite, packs, uploads the artifact, then pushes with `--skip-duplicate`
-(GitHub Packages rejects overwriting a published version) and `--no-symbols` (the feed does not
-accept `.snupkg`). Version resolution prefers the workflow input, then the tag, then the
-`<Version>` in the project file.
+Two workflows publish the package.
+
+`.github/workflows/ci.yml` publishes a prerelease on every push to `master`. Its `publish` job runs
+after `build-test` and is gated to `master` pushes on this repository, so pull requests, feature
+branches, and forks build and test without ever pushing a package. The version is the GitVersion
+value plus a `-ci.<run_number>` suffix, which keeps a plain version number meaning "tagged release"
+and orders every CI build below it. The job packs without `--no-build` so the assembly and the
+package carry the same version.
+
+`.github/workflows/publish-package.yml` publishes stable versions on `v*` tags or manual dispatch,
+resolving the version from the workflow input, then the tag, then the `<Version>` in the project
+file.
+
+Both push with `--skip-duplicate` (GitHub Packages rejects overwriting a published version, so
+re-runs stay idempotent) and `--no-symbols` (the feed does not accept `.snupkg`), and both upload the
+package as a build artifact before pushing.
 
 To verify a package locally before publishing:
 

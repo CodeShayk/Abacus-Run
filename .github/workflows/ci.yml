@@ -1,4 +1,4 @@
-name: CI (Build and Test)
+name: CI (Build, Test and Publish)
 
 on:
   pull_request:
@@ -9,6 +9,11 @@ on:
 
 permissions:
   contents: read
+  packages: write
+
+env:
+  PACKAGE_PROJECT: src/Abacus.Run/Abacus.Run.csproj
+  FEED: https://nuget.pkg.github.com/CodeShayk/index.json
 
 jobs:
   build-test:
@@ -53,3 +58,79 @@ jobs:
       - name: Test
         run: dotnet test --configuration Release --no-build --collect:"XPlat Code Coverage"
         working-directory: '${{ env.working-directory }}'
+
+  # Publishes src/Abacus.Run to GitHub Packages as a CI prerelease.
+  #
+  # Only master pushes publish. Pull requests and feature branches build and test but never push a
+  # package, and the repository guard stops forks (whose GITHUB_TOKEN cannot write here anyway) from
+  # attempting it.
+  #
+  # Versions carry a -ci.<run> suffix so a stable version stays the exclusive product of a tagged
+  # release via release.yml / publish-package.yml. That keeps `1.0.0` meaning "released" and orders
+  # every CI build below it.
+  publish:
+    needs: build-test
+    if: >-
+      github.event_name == 'push'
+      && github.ref == 'refs/heads/master'
+      && github.repository == 'CodeShayk/Abacus-Run'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Install GitVersion
+        uses: gittools/actions/gitversion/setup@v0.9.15
+        with:
+          versionSpec: 5.x
+
+      - name: Determine Version
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@v0.9.15
+        with:
+          useConfigFile: true
+
+      - name: Compose CI version
+        id: version
+        run: |
+          VERSION="${{ steps.gitversion.outputs.NuGetVersionV2 }}-ci.${{ github.run_number }}"
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Publishing Abacus.Run ${VERSION}"
+
+      # Packed without --no-build so the assembly and the package carry the same version; the
+      # library is a single project, so the rebuild is cheap.
+      - name: Pack
+        run: >
+          dotnet pack ${{ env.PACKAGE_PROJECT }}
+          --configuration Release
+          -p:Version=${{ steps.version.outputs.value }}
+          -o artifacts
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg-${{ steps.version.outputs.value }}
+          path: artifacts/*
+
+      - name: Push to GitHub Packages
+        run: |
+          dotnet nuget add source "${FEED}" \
+            --name github \
+            --username "${{ github.actor }}" \
+            --password "${{ secrets.GITHUB_TOKEN }}" \
+            --store-password-in-clear-text
+
+          # --skip-duplicate keeps re-runs idempotent; the feed rejects overwriting a published
+          # version. --no-symbols because it does not accept .snupkg.
+          dotnet nuget push "artifacts/*.nupkg" \
+            --source github \
+            --api-key "${{ secrets.GITHUB_TOKEN }}" \
+            --skip-duplicate \
+            --no-symbols
