@@ -9,6 +9,10 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Only Abacus.Run ships as a package; it opts back in explicitly. This keeps the deployable
+         host and the test projects out of `dotnet pack` at the solution level. -->
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <PropertyGroup>

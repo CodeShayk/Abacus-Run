@@ -3,6 +3,47 @@
     <RootNamespace>Abacus.Run</RootNamespace>
   </PropertyGroup>
 
+  <PropertyGroup Label="Package">
+    <IsPackable>true</IsPackable>
+    <PackageId>Abacus.Run</PackageId>
+    <Version>1.0.0</Version>
+    <Title>Abacus Run - durable workflow host for Microsoft Agent Framework</Title>
+    <Authors>Najaf Shaikh</Authors>
+    <Company>CodeShayk</Company>
+    <Product>Abacus Run</Product>
+    <Description>
+      A headless, durable workflow host built on Microsoft Agent Framework workflows. Provides
+      versioned workflow registration, checkpointed execution with resume, lease-based dispatch
+      across replicas, retry and dead-stop classification driven by the workflow itself,
+      configuration-driven human approval gates, per-run and per-executor middleware pipelines,
+      sequenced event history with SSE streaming, and out-of-the-box HTTP API and LLM executors.
+      Storage and transport sit behind interfaces, with in-memory implementations included so the
+      package runs standalone.
+    </Description>
+    <PackageTags>workflow;orchestration;durable;agent-framework;ai;approvals;saga;dotnet;aspnetcore</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/CodeShayk/Abacus-Run</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/CodeShayk/Abacus-Run</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <Copyright>Copyright (c) 2025 Najaf Shaikh</Copyright>
+
+    <!-- Ship XML docs: the public surface is contract-heavy and the remarks explain invariants
+         (checkpoint ordering, gate precedence, at-least-once semantics) that callers must respect. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
   <ItemGroup>
     <!-- The library owns the HTTP API (endpoints, SSE) but no UI, so it needs the ASP.NET Core
          shared framework without Razor. The control plane lives in the deployable host. -->

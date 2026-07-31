@@ -6,6 +6,24 @@ The runtime is built on Microsoft Agent Framework workflows. Stores are exposed 
 
 The solution is split in two. `Abacus.Run` is the reusable, headless framework: runtime, dispatch, executors, middleware, in-memory store defaults, and the HTTP API. `Abacus.Run.Service` is the deployable host: the control-plane UI, the SQL Server and Redis implementations, and the startup wiring that selects them. Referencing the library alone gives a working API host with no UI and no infrastructure dependencies.
 
+## Install
+
+`Abacus.Run` — the framework library — is published to GitHub Packages:
+
+```bash
+dotnet add package Abacus.Run --version 1.0.0
+```
+
+Add the feed once, authenticating with a PAT that has `read:packages`:
+
+```bash
+dotnet nuget add source https://nuget.pkg.github.com/CodeShayk/index.json   --name github --username <you> --password <token> --store-password-in-clear-text
+```
+
+The package is the headless framework only; `Abacus.Run.Service` is the reference host and is not
+published. The `Package (Publish to GitHub Packages)` workflow publishes on `v*` tags and on manual
+dispatch.
+
 ## Requirements
 
 - .NET 9 SDK

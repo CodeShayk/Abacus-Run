@@ -719,6 +719,33 @@ Use instance events for business progress and state transitions; use logs and tr
 
 The options distinguish instance, checkpoint, event, and audit retention. With in-memory stores, retention is process-local. Durable implementations should enforce the same policy with scheduled cleanup jobs and should preserve enough event history for operational replay and audit requirements.
 
+## NuGet package
+
+The framework library ships as `Abacus.Run` on GitHub Packages. The deployable host
+(`Abacus.Run.Service`) is a reference implementation and is deliberately not packaged — it exists to
+show how to wire concrete infrastructure and to host the control-plane UI.
+
+```bash
+dotnet add package Abacus.Run --version 1.0.0
+```
+
+Packaging is declared in `src/Abacus.Run/Abacus.Run.csproj`. The root `Directory.Build.props` sets
+`IsPackable=false` so a solution-level `dotnet pack` emits exactly one package; the library opts back
+in. The package embeds its own README and the MIT licence, ships XML documentation, and produces a
+`.snupkg` symbol package alongside.
+
+Publishing runs from `.github/workflows/publish-package.yml` on `v*` tags or manual dispatch. It
+builds, runs the full test suite, packs, uploads the artifact, then pushes with `--skip-duplicate`
+(GitHub Packages rejects overwriting a published version) and `--no-symbols` (the feed does not
+accept `.snupkg`). Version resolution prefers the workflow input, then the tag, then the
+`<Version>` in the project file.
+
+To verify a package locally before publishing:
+
+```bash
+dotnet pack src/Abacus.Run -c Release -o artifacts
+```
+
 ## Containers and GHCR
 
 The root `Dockerfile` is a multi-stage build:

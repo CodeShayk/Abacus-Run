@@ -1,0 +1,86 @@
+name: Package (Publish to GitHub Packages)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version to publish (defaults to the version in Abacus.Run.csproj)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  PROJECT: src/Abacus.Run/Abacus.Run.csproj
+  FEED: https://nuget.pkg.github.com/CodeShayk/index.json
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            # Fall back to the version declared in the project file.
+            VERSION=$(grep -oPm1 '(?<=<Version>)[^<]+' "${PROJECT}")
+          fi
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Publishing Abacus.Run ${VERSION}"
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build -c Release --no-restore
+
+      # The package is the product; shipping it untested is not worth the few minutes saved.
+      - name: Test
+        run: dotnet test -c Release --no-build
+
+      - name: Pack
+        run: >
+          dotnet pack ${{ env.PROJECT }}
+          -c Release --no-build
+          -p:Version=${{ steps.version.outputs.value }}
+          -o artifacts
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg-${{ steps.version.outputs.value }}
+          path: artifacts/*
+
+      - name: Push to GitHub Packages
+        run: |
+          dotnet nuget add source "${FEED}" \
+            --name github \
+            --username "${{ github.actor }}" \
+            --password "${{ secrets.GITHUB_TOKEN }}" \
+            --store-password-in-clear-text
+
+          # --skip-duplicate keeps re-runs idempotent; GitHub Packages rejects overwriting an
+          # existing version. --no-symbols because the feed does not accept .snupkg.
+          dotnet nuget push "artifacts/*.nupkg" \
+            --source github \
+            --api-key "${{ secrets.GITHUB_TOKEN }}" \
+            --skip-duplicate \
+            --no-symbols
