@@ -18,7 +18,7 @@ public class LlmExecutorTests
 
     private static LlmOptions Options(string userTemplate = "Classify: {{ Text }}") => new()
     {
-        Model = "claude-sonnet-5",
+        Model = "test-model-v1",
         SystemPrompt = "You are a classifier.",
         UserTemplate = userTemplate
     };
@@ -35,7 +35,7 @@ public class LlmExecutorTests
         result.Value.Should().Be("invoice");
         result.InputTokens.Should().Be(120);
         result.OutputTokens.Should().Be(8);
-        result.ModelId.Should().Be("claude-sonnet-5");
+        result.ModelId.Should().Be("test-model-v1");
     }
 
     [Fact]
@@ -74,7 +74,7 @@ public class LlmExecutorTests
         var client = new FakeChatClient("ok");
         await Build(options, client).HandleAsync(new Document("x"), new FakeWorkflowContext(), default);
 
-        client.LastOptions!.ModelId.Should().Be("claude-sonnet-5");
+        client.LastOptions!.ModelId.Should().Be("test-model-v1");
         client.LastOptions.Temperature.Should().Be(0.2f);
         client.LastOptions.MaxOutputTokens.Should().Be(512);
     }
@@ -165,7 +165,7 @@ public class LlmExecutorTests
         var executor = new LlmExecutor("classify", options, _ => new FakeChatClient("x"));
 
         executor.Metadata["node.kind"].Should().Be("llm");
-        executor.Metadata["llm.model"].Should().Be("claude-sonnet-5");
+        executor.Metadata["llm.model"].Should().Be("test-model-v1");
         executor.Metadata[Abacus.Run.Abstractions.Middleware.MiddlewareContextKeys.PromptVersion].Should().Be("v3");
     }
 

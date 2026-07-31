@@ -219,7 +219,7 @@ public class LlmDriftMiddlewareTests
             new DriftOptions { MinSamples = minSamples, SigmaThreshold = 3.0 },
             NullLogger<LlmDriftMiddleware>.Instance, clock: _clock);
 
-    private static ExecutorInvocationContext LlmInvocation(string model = "claude-sonnet-5")
+    private static ExecutorInvocationContext LlmInvocation(string model = "test-model-v1")
     {
         var descriptor = new ExecutorDescriptor("classify", typeof(LlmExecutor), "wf", "1.0.0", ExecutionMode.Autonomous)
         {
@@ -253,12 +253,12 @@ public class LlmDriftMiddlewareTests
 
         await middleware.InvokeAsync(LlmInvocation(), (ctx, _) =>
         {
-            ctx.Output = new LlmResult("value", "some text", 100, 50, "claude-sonnet-5", "stop");
+            ctx.Output = new LlmResult("value", "some text", 100, 50, "test-model-v1", "stop");
             return ValueTask.CompletedTask;
         }, default);
 
         DriftBaseline? baseline = await baselines.GetAsync(
-            new DriftKey("wf", "classify", "claude-sonnet-5", null), default);
+            new DriftKey("wf", "classify", "test-model-v1", null), default);
 
         baseline!.SampleCount.Should().Be(1);
         baseline.OutputTokenMean.Should().Be(50);
@@ -275,7 +275,7 @@ public class LlmDriftMiddlewareTests
         {
             await middleware.InvokeAsync(LlmInvocation(), (ctx, _) =>
             {
-                ctx.Output = new LlmResult("v", "text", 10, 10, "claude-sonnet-5", "stop");
+                ctx.Output = new LlmResult("v", "text", 10, 10, "test-model-v1", "stop");
                 return ValueTask.CompletedTask;
             }, default);
         }
@@ -310,7 +310,7 @@ public class LlmDriftMiddlewareTests
         var alerts = new CollectingDriftAlertSink();
         LlmDriftMiddleware middleware = Build(baselines, alerts, minSamples: 1);
 
-        var key = new DriftKey("wf", "classify", "claude-sonnet-5", null);
+        var key = new DriftKey("wf", "classify", "test-model-v1", null);
         for (int i = 0; i < 5; i++)
         {
             await baselines.AddSampleAsync(key, Sample(100, 50), default);
@@ -318,7 +318,7 @@ public class LlmDriftMiddlewareTests
 
         await middleware.InvokeAsync(LlmInvocation(), (ctx, _) =>
         {
-            ctx.Output = new LlmResult("v", "text", 100, 50, "claude-opus-5", "stop");
+            ctx.Output = new LlmResult("v", "text", 100, 50, "test-model-v2", "stop");
             return ValueTask.CompletedTask;
         }, default);
 

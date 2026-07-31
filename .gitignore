@@ -418,7 +418,6 @@ FodyWeavers.xsd
 *.msp
 
 agent-framework/
-.claude/
 docs/
 !docs/
 docs/*

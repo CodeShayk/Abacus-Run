@@ -2,7 +2,6 @@
 **/obj/
 .git/
 .github/
-.claude/
 agent-framework/
 docs/
 tests/
