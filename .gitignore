@@ -420,3 +420,6 @@ FodyWeavers.xsd
 agent-framework/
 .claude/
 docs/
+!docs/
+docs/*
+!docs/wiki.md

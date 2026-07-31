@@ -4,10 +4,8 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../../src/Abacus.Run.Service/Abacus.Run.Service.csproj" />
     <PackageReference Include="NBomber" Version="6.0.0" />
     <PackageReference Include="NBomber.Http" Version="6.0.0" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="../../src/Abacus.Run.Api/Abacus.Run.Api.csproj" />
   </ItemGroup>
 </Project>

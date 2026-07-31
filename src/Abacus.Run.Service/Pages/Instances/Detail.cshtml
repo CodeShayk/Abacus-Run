@@ -1,0 +1,156 @@
+@page "/control/Instances/Detail"
+@model Abacus.Run.Service.ControlPlane.Pages.Instances.DetailModel
+@{
+    ViewData["Title"] = $"Instance {Model.Instance?.InstanceId[..Math.Min(12, Model.Instance?.InstanceId.Length ?? 0)]}…";
+}
+
+@if (Model.Instance is null)
+{
+    <p class="empty-state">Instance not found.</p>
+    return;
+}
+
+<div class="detail-header">
+    <div class="detail-meta">
+        <dl>
+            <dt>Instance ID</dt><dd>@Model.Instance.InstanceId</dd>
+            <dt>Workflow</dt><dd>@Model.Instance.WorkflowName v@Model.Instance.WorkflowVersion</dd>
+            <dt>Status</dt><dd><partial name="Shared/_StatusBadge" model="@Model.Instance.Status.ToString()" /></dd>
+            <dt>Attempts</dt><dd>@Model.Instance.AttemptCount / @Model.Instance.MaxAttempts</dd>
+            <dt>Created</dt><dd>@Model.Instance.CreatedAt.ToString("O")</dd>
+            @if (Model.Instance.StartedAt is not null)
+            {
+                <dt>Started</dt><dd>@Model.Instance.StartedAt.Value.ToString("O")</dd>
+            }
+            @if (Model.Instance.CompletedAt is not null)
+            {
+                <dt>Completed</dt><dd>@Model.Instance.CompletedAt.Value.ToString("O")</dd>
+            }
+            @if (!string.IsNullOrEmpty(Model.Instance.TerminalReason))
+            {
+                <dt>Reason</dt><dd class="terminal-reason">@Model.Instance.TerminalReason</dd>
+            }
+            @if (!string.IsNullOrEmpty(Model.Instance.CorrelationId))
+            {
+                <dt>Correlation ID</dt><dd>@Model.Instance.CorrelationId</dd>
+            }
+        </dl>
+    </div>
+
+    <div class="detail-actions">
+        @* Actions rendered disabled-with-reason for invalid status — FR-11.6 *@
+        <form method="post" class="inline-form">
+            <input type="hidden" name="id" value="@Model.Instance.InstanceId" />
+
+            <div class="action-group">
+                <button type="submit" asp-page-handler="Cancel"
+                    class="btn btn-danger"
+                    disabled="@(!Model.Actions.Cancel.Enabled)"
+                    title="@(Model.Actions.Cancel.DisabledReason ?? "Cancel this instance")">
+                    Cancel
+                </button>
+
+                <button type="submit" asp-page-handler="RerunRestart"
+                    class="btn btn-secondary"
+                    disabled="@(!Model.Actions.RerunRestart.Enabled)"
+                    title="@(Model.Actions.RerunRestart.DisabledReason ?? "Restart from scratch")">
+                    Restart
+                </button>
+
+                <button type="submit" asp-page-handler="RerunResume"
+                    class="btn btn-secondary"
+                    disabled="@(!Model.Actions.RerunResume.Enabled)"
+                    title="@(Model.Actions.RerunResume.DisabledReason ?? "Resume from last checkpoint")">
+                    Resume
+                </button>
+
+                <button type="submit" asp-page-handler="Retry"
+                    class="btn btn-secondary"
+                    disabled="@(!Model.Actions.Retry.Enabled)"
+                    title="@(Model.Actions.Retry.DisabledReason ?? "Force retry")">
+                    Retry
+                </button>
+            </div>
+
+            <div class="action-reason">
+                <label for="reason">Reason</label>
+                <input type="text" id="reason" name="Reason" placeholder="Required for control actions" />
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="detail-tabs">
+    <nav class="tab-nav" role="tablist">
+        <button class="tab active" role="tab" data-tab="graph" aria-selected="true">Graph</button>
+        <button class="tab" role="tab" data-tab="events">Events</button>
+        <button class="tab" role="tab" data-tab="context">Context</button>
+    </nav>
+
+    <div class="tab-panel active" id="tab-graph" role="tabpanel">
+        <partial name="Shared/_GraphPanel" model="@Model.Graph" />
+    </div>
+
+    <div class="tab-panel" id="tab-events" role="tabpanel">
+        @if (Model.Events?.Items.Count > 0)
+        {
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Seq</th>
+                        <th>Type</th>
+                        <th>Executor</th>
+                        <th>Superstep</th>
+                        <th>Time</th>
+                    </tr>
+                </thead>
+                <tbody id="events-tbody">
+                    @foreach (var evt in Model.Events.Items)
+                    {
+                        <tr>
+                            <td>@evt.Sequence</td>
+                            <td><span class="event-type">@evt.EventType</span></td>
+                            <td>@(evt.ExecutorId ?? "—")</td>
+                            <td>@(evt.Superstep?.ToString() ?? "—")</td>
+                            <td>@evt.OccurredAt.ToString("HH:mm:ss.fff")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+        else
+        {
+            <p class="empty-state">No events recorded.</p>
+        }
+    </div>
+
+    <div class="tab-panel" id="tab-context" role="tabpanel">
+        <pre class="json-block">@(Model.Instance.ContextJson ?? "{}")</pre>
+        @if (!string.IsNullOrEmpty(Model.Instance.ResultJson))
+        {
+            <h3>Result</h3>
+            <pre class="json-block">@Model.Instance.ResultJson</pre>
+        }
+    </div>
+</div>
+
+@section Scripts {
+    <script src="~/js/graph.js"></script>
+    <script>
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
+                document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+                tab.classList.add('active');
+                tab.setAttribute('aria-selected', 'true');
+                document.getElementById('tab-' + tab.dataset.tab)?.classList.add('active');
+            });
+        });
+
+        // Initialize live updates
+        if (typeof initLiveUpdates === 'function') {
+            initLiveUpdates('@Model.Instance.InstanceId', @(Model.Instance.Status.IsTerminal() ? "true" : "false"));
+        }
+    </script>
+}

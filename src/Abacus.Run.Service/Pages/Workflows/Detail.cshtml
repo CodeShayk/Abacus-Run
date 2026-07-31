@@ -1,0 +1,44 @@
+@page "/control/Workflows/Detail"
+@model Abacus.Run.Service.ControlPlane.Pages.Workflows.DetailModel
+@{
+    ViewData["Title"] = $"Workflow: {Model.Name}";
+}
+
+<div class="detail-header">
+    <dl>
+        <dt>Name</dt><dd>@Model.Name</dd>
+        <dt>Version</dt><dd>@Model.Version</dd>
+    </dl>
+</div>
+
+<section class="dashboard-section">
+    <h2>Recent Instances</h2>
+    @if (Model.RecentInstances?.Items.Count > 0)
+    {
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Instance ID</th>
+                    <th>Status</th>
+                    <th>Attempts</th>
+                    <th>Created</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var instance in Model.RecentInstances.Items)
+                {
+                    <tr>
+                        <td><a href="/control/Instances/Detail?id=@instance.InstanceId">@instance.InstanceId[..Math.Min(12, instance.InstanceId.Length)]…</a></td>
+                        <td><partial name="Shared/_StatusBadge" model="@instance.Status.ToString()" /></td>
+                        <td>@instance.AttemptCount</td>
+                        <td>@instance.CreatedAt.ToString("g")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+    else
+    {
+        <p class="empty-state">No instances for this workflow.</p>
+    }
+</section>

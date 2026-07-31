@@ -5,7 +5,7 @@ using Abacus.Run.Abstractions;
 using Abacus.Run.Abstractions.Middleware;
 using Abacus.Run.Core;
 using Abacus.Run.Executors;
-using Abacus.Run.Middleware;
+using Abacus.Run.Middlewares;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;

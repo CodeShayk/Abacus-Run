@@ -1,0 +1,109 @@
+@page "/control/Instances"
+@model Abacus.Run.Service.ControlPlane.Pages.Instances.IndexModel
+@{
+    ViewData["Title"] = "Instances";
+}
+
+<div class="filter-bar">
+    <form method="get" class="filter-form">
+        <div class="filter-group">
+            <label for="workflowName">Workflow</label>
+            <input type="text" id="workflowName" name="workflowName" value="@Model.WorkflowName" placeholder="All workflows" />
+        </div>
+        <div class="filter-group">
+            <label for="statuses">Status</label>
+            <select id="statuses" name="statuses">
+                <option value="">All</option>
+                <option value="Pending" selected="@(Model.Statuses == "Pending")">Pending</option>
+                <option value="Running" selected="@(Model.Statuses == "Running")">Running</option>
+                <option value="Completed" selected="@(Model.Statuses == "Completed")">Completed</option>
+                <option value="Failed" selected="@(Model.Statuses == "Failed")">Failed</option>
+                <option value="DeadStopped" selected="@(Model.Statuses == "DeadStopped")">Dead Stopped</option>
+                <option value="AwaitingApproval" selected="@(Model.Statuses == "AwaitingApproval")">Awaiting Approval</option>
+                <option value="Cancelled" selected="@(Model.Statuses == "Cancelled")">Cancelled</option>
+            </select>
+        </div>
+        <button type="submit" class="btn btn-primary">Filter</button>
+    </form>
+</div>
+
+@if (Model.Instances?.Items.Count > 0)
+{
+    <table class="data-table" id="instances-grid">
+        <thead>
+            <tr>
+                <th><input type="checkbox" id="select-all" aria-label="Select all" /></th>
+                <th>Instance ID</th>
+                <th>Workflow</th>
+                <th>Version</th>
+                <th>Status</th>
+                <th>Attempts</th>
+                <th>Created</th>
+                <th>Updated</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var instance in Model.Instances.Items)
+            {
+                <tr>
+                    <td><input type="checkbox" class="instance-select" value="@instance.InstanceId" aria-label="Select @instance.InstanceId" /></td>
+                    <td><a href="/control/Instances/Detail?id=@instance.InstanceId">@instance.InstanceId[..Math.Min(12, instance.InstanceId.Length)]…</a></td>
+                    <td>@instance.WorkflowName</td>
+                    <td>@instance.WorkflowVersion</td>
+                    <td><partial name="Shared/_StatusBadge" model="@instance.Status.ToString()" /></td>
+                    <td>@instance.AttemptCount</td>
+                    <td>@instance.CreatedAt.ToString("g")</td>
+                    <td>@instance.UpdatedAt.ToString("g")</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    <div class="pagination">
+        @if (Model.Offset > 0)
+        {
+            <a href="?offset=@(Math.Max(0, Model.Offset - Model.Limit))&workflowName=@Model.WorkflowName&statuses=@Model.Statuses" class="btn btn-secondary">← Previous</a>
+        }
+        <span class="page-info">Showing @(Model.Offset + 1)–@(Model.Offset + Model.Instances.Items.Count) of @Model.Instances.Total</span>
+        @if (Model.Offset + Model.Instances.Items.Count < Model.Instances.Total)
+        {
+            <a href="?offset=@(Model.Offset + Model.Limit)&workflowName=@Model.WorkflowName&statuses=@Model.Statuses" class="btn btn-secondary">Next →</a>
+        }
+    </div>
+
+    <div class="bulk-actions">
+        <form method="post" asp-page-handler="BulkCancel">
+            <label for="confirmCount">Confirm count to cancel:</label>
+            <input type="number" id="confirmCount" name="confirmCount" min="1" required />
+            <input type="hidden" name="instanceIds" id="bulk-instance-ids" />
+            <button type="submit" class="btn btn-danger" id="bulk-cancel-btn" disabled>Bulk Cancel</button>
+        </form>
+    </div>
+}
+else
+{
+    <p class="empty-state">No instances match the current filters.</p>
+}
+
+@section Scripts {
+    <script>
+        // Bulk selection logic
+        const selectAll = document.getElementById('select-all');
+        const bulkBtn = document.getElementById('bulk-cancel-btn');
+        const bulkIds = document.getElementById('bulk-instance-ids');
+
+        selectAll?.addEventListener('change', e => {
+            document.querySelectorAll('.instance-select').forEach(cb => cb.checked = e.target.checked);
+            updateBulkState();
+        });
+
+        document.querySelectorAll('.instance-select').forEach(cb =>
+            cb.addEventListener('change', updateBulkState));
+
+        function updateBulkState() {
+            const selected = [...document.querySelectorAll('.instance-select:checked')].map(cb => cb.value);
+            bulkIds.value = selected.join(',');
+            bulkBtn.disabled = selected.length === 0;
+        }
+    </script>
+}

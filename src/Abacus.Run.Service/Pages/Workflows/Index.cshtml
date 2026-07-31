@@ -1,0 +1,34 @@
+@page "/control/Workflows"
+@model Abacus.Run.Service.ControlPlane.Pages.Workflows.IndexModel
+@{
+    ViewData["Title"] = "Registered Workflows";
+}
+
+@if (Model.Workflows?.Count > 0)
+{
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Version</th>
+                <th>Context Type</th>
+                <th>Result Type</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var wf in Model.Workflows)
+            {
+                <tr>
+                    <td><a href="/control/Workflows/Detail?name=@wf.Name&version=@wf.Version">@wf.Name</a></td>
+                    <td>@wf.Version</td>
+                    <td><code>@wf.ContextTypeName</code></td>
+                    <td><code>@wf.ResultTypeName</code></td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+else
+{
+    <p class="empty-state">No workflows registered.</p>
+}

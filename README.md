@@ -4,6 +4,8 @@ Abacus Run is a .NET workflow runtime and HTTP host for durable, observable work
 
 The runtime is built on Microsoft Agent Framework workflows. Stores are exposed through interfaces so the in-memory implementation can be replaced by durable persistence without changing workflow definitions.
 
+The solution is split in two. `Abacus.Run` is the reusable, headless framework: runtime, dispatch, executors, middleware, in-memory store defaults, and the HTTP API. `Abacus.Run.Service` is the deployable host: the control-plane UI, the SQL Server and Redis implementations, and the startup wiring that selects them. Referencing the library alone gives a working API host with no UI and no infrastructure dependencies.
+
 ## Requirements
 
 - .NET 9 SDK
@@ -22,7 +24,7 @@ dotnet test Abacus.Run.slnx
 Start the HTTP host:
 
 ```bash
-dotnet run --project src/Abacus.Run.Api/Abacus.Run.Api.csproj
+dotnet run --project src/Abacus.Run.Service/Abacus.Run.Service.csproj
 ```
 
 ### Run the container
@@ -51,10 +53,8 @@ The API project is intentionally a host shell. Register one or more workflow def
 
 ```csharp
 builder.Services
-    .AddWorkflowHost(builder.Configuration)
-    .AddWorkflow<OrderWorkflow>()
-    .AddBuiltInMiddleware()
-    .AddBackgroundServices();
+  .AddAbacus(builder.Configuration)
+  .AddWorkflow<OrderWorkflow>();
 ```
 
 `OrderWorkflow` must implement `IWorkflowDefinition` or `IWorkflowDefinition<TContext, TResult>`. Use `WorkflowBuildContext.Node(...)` to attach host executors and declare approval gates.
@@ -122,18 +122,34 @@ Options are read from the `WorkflowHost` configuration section. For example:
 
 The default host uses in-memory instance, event, log, approval, checkpoint, blob, and audit stores. Treat this configuration as development-oriented until durable store implementations are supplied.
 
+Set `Abacus:SqlServer:ConnectionString` to enable the EF Core SQL Server stores and `Abacus:Redis:ConnectionString` to enable Redis Streams and control messages. `AddAbacus` keeps the in-memory stores when these settings are absent.
+
 ## Project Layout
 
 | Project | Responsibility |
 | --- | --- |
-| `Abacus.Run.Abstractions` | Workflow definitions, executors, approvals, instances, and middleware contracts |
-| `Abacus.Run.Core` | Registry, runner, dispatch, retries, gates, events, redaction, and host options |
-| `Abacus.Run.Executors` | API, LLM, template, and supporting executors |
-| `Abacus.Run.Middleware` | Built-in workflow and executor middleware, including drift monitoring |
-| `Abacus.Run.Persistence` | In-memory stores and checkpoint overflow handling |
-| `Abacus.Run.Api` | ASP.NET Core host, endpoints, instance control, and SSE |
-| `tests/Abacus.Run.UnitTests` | Unit coverage for runtime behavior |
-| `tests/Abacus.Run.IntegrationTests` | HTTP and end-to-end host coverage |
+| `src/Abacus.Run` | Headless framework: workflow runtime, dispatch, executors, middleware, in-memory store defaults, and HTTP API endpoints |
+| `src/Abacus.Run.Service` | Deployable host: control-plane UI, SQL Server stores, Redis event bus, and startup wiring |
+| `tests/Abacus.Run.UnitTests` | Unit coverage for runtime behavior; references the library only |
+| `tests/Abacus.Run.IntegrationTests` | HTTP, control-plane, and architecture-boundary coverage against the real host |
+| `tests/Abacus.Run.ChaosTests` | Failure and lifecycle resilience coverage |
+| `tests/Abacus.Run.LoadTests` | Load-oriented test project |
+
+Folders inside each project:
+
+```
+src/Abacus.Run/               src/Abacus.Run.Service/
+  Abstractions/                 ControlPlane/      Razor Pages backing services
+  Api/                          Infrastructure/    SQL Server stores, Redis bus
+  Core/                         Pages/             control-plane Razor Pages
+  Dispatch/                     wwwroot/           control-plane CSS and JS
+  EventBus/                     Program.cs
+  Executors/                    AbacusServiceCollectionExtensions.cs
+  Middlewares/
+  Persistence/
+```
+
+The library carries no Razor, MVC, Entity Framework, or Redis dependency; an architecture test in the integration suite enforces this.
 
 ## Test Coverage
 

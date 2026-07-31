@@ -14,12 +14,6 @@
     <PackageReference Include="coverlet.msbuild" Version="6.0.2" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="../../src/Abacus.Run.Abstractions/Abacus.Run.Abstractions.csproj" />
-    <ProjectReference Include="../../src/Abacus.Run.Core/Abacus.Run.Core.csproj" />
-    <ProjectReference Include="../../src/Abacus.Run.Executors/Abacus.Run.Executors.csproj" />
-    <ProjectReference Include="../../src/Abacus.Run.Middleware/Abacus.Run.Middleware.csproj" />
-    <ProjectReference Include="../../src/Abacus.Run.Persistence/Abacus.Run.Persistence.csproj" />
-    <ProjectReference Include="../../src/Abacus.Run.Dispatch/Abacus.Run.Dispatch.csproj" />
-    <ProjectReference Include="../../src/Abacus.Run.Api/Abacus.Run.Api.csproj" />
+    <ProjectReference Include="../../src/Abacus.Run/Abacus.Run.csproj" />
   </ItemGroup>
 </Project>

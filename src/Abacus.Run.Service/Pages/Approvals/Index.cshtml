@@ -1,0 +1,47 @@
+@page "/control/Approvals"
+@model Abacus.Run.Service.ControlPlane.Pages.Approvals.IndexModel
+@{
+    ViewData["Title"] = "Pending Approvals";
+}
+
+@if (Model.Approvals?.Items.Count > 0)
+{
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Approval ID</th>
+                <th>Instance</th>
+                <th>Executor</th>
+                <th>Reason</th>
+                <th>Assignees</th>
+                <th>Expires</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var approval in Model.Approvals.Items)
+            {
+                <tr>
+                    <td>@approval.ApprovalId[..Math.Min(12, approval.ApprovalId.Length)]…</td>
+                    <td><a href="/control/Instances/Detail?id=@approval.InstanceId">@approval.InstanceId[..Math.Min(12, approval.InstanceId.Length)]…</a></td>
+                    <td>@approval.ExecutorId</td>
+                    <td>@(approval.Reason ?? "—")</td>
+                    <td>@string.Join(", ", approval.Assignees)</td>
+                    <td>@approval.ExpiresAt.ToString("g")</td>
+                    <td>
+                        <form method="post" class="inline-form">
+                            <input type="hidden" name="approvalId" value="@approval.ApprovalId" />
+                            <input type="text" name="Comment" placeholder="Comment (optional)" class="inline-input" />
+                            <button type="submit" asp-page-handler="Approve" class="btn btn-success btn-sm">Approve</button>
+                            <button type="submit" asp-page-handler="Reject" class="btn btn-danger btn-sm">Reject</button>
+                        </form>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+else
+{
+    <p class="empty-state">No pending approvals.</p>
+}

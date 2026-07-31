@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@ViewData["Title"] - Abacus Run Control Plane</title>
+    <link rel="stylesheet" href="~/css/site.css" />
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+</head>
+<body>
+    <div class="layout">
+        <nav class="sidebar" aria-label="Control plane navigation">
+            <div class="sidebar-brand">
+                <h2>Abacus Run</h2>
+                <span class="version">Control Plane</span>
+            </div>
+            <ul class="sidebar-nav">
+                <li><a href="/control/Dashboard" class="@NavClass("Dashboard")">📊 Dashboard</a></li>
+                <li><a href="/control/Instances" class="@NavClass("Instances")">📋 Instances</a></li>
+                <li><a href="/control/Approvals" class="@NavClass("Approvals")">✅ Approvals</a></li>
+                <li><a href="/control/Workflows" class="@NavClass("Workflows")">⚙️ Workflows</a></li>
+            </ul>
+        </nav>
+
+        <main class="main-content">
+            <header class="page-header">
+                <h1>@ViewData["Title"]</h1>
+            </header>
+
+            @if (TempData["Toast"] is string toast)
+            {
+                <div class="toast" role="alert">
+                    @toast
+                    <button type="button" class="toast-close" aria-label="Dismiss">&times;</button>
+                </div>
+            }
+
+            <div class="page-body">
+                @RenderBody()
+            </div>
+        </main>
+    </div>
+
+    <script src="~/js/live.js"></script>
+    @await RenderSectionAsync("Scripts", required: false)
+
+    <script>
+        // Auto-dismiss toasts after 5 seconds.
+        document.querySelectorAll('.toast').forEach(t => {
+            setTimeout(() => t.remove(), 5000);
+            t.querySelector('.toast-close')?.addEventListener('click', () => t.remove());
+        });
+    </script>
+</body>
+</html>
+
+@functions {
+    string NavClass(string page)
+    {
+        var current = ViewContext.RouteData.Values["page"]?.ToString() ?? "";
+        return current.Contains(page, StringComparison.OrdinalIgnoreCase) ? "active" : "";
+    }
+}

@@ -1,5 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <ItemGroup>
-    <ProjectReference Include="../Abacus.Run.Core/Abacus.Run.Core.csproj" />
-  </ItemGroup>
-</Project>

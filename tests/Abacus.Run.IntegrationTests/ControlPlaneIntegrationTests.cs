@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.RegularExpressions;
 using FluentAssertions;
 using Xunit;
 
@@ -92,5 +93,34 @@ public class ControlPlaneIntegrationTests : IClassFixture<HostFixture>
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         string json = await response.Content.ReadAsStringAsync();
         json.Should().Contain("activeInstances");
+    }
+
+    [Theory]
+    [InlineData("/css/site.css")]
+    [InlineData("/js/live.js")]
+    [InlineData("/js/graph.js")]
+    public async Task Static_assets_are_served(string path)
+    {
+        // A broken asset path 404s silently and leaves the UI unstyled with no live updates, which a
+        // page-returns-200 assertion would sail straight past.
+        HttpResponseMessage response = await _client.GetAsync(path);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await response.Content.ReadAsStringAsync()).Should().NotBeEmpty();
+    }
+
+    [Fact]
+    public async Task Layout_asset_links_resolve()
+    {
+        string html = await _client.GetStringAsync("/control/Dashboard");
+
+        MatchCollection matches = Regex.Matches(html, @"(?:href|src)=""(/(?:css|js)/[^""]+)""");
+        matches.Should().NotBeEmpty("the layout must reference the control plane's static assets");
+
+        foreach (Match match in matches)
+        {
+            HttpResponseMessage asset = await _client.GetAsync(match.Groups[1].Value);
+            asset.StatusCode.Should().Be(HttpStatusCode.OK, $"{match.Groups[1].Value} is referenced by the layout");
+        }
     }
 }

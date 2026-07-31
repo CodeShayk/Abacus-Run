@@ -1,0 +1,25 @@
+@* Graph panel partial: Mermaid container with live overlay hooks (§12.2) *@
+@model Abacus.Run.Service.ControlPlane.Services.GraphResponse?
+
+@if (Model is not null)
+{
+    <div class="graph-panel" id="graph-panel">
+        <div class="graph-container" id="graph-container">
+            <pre class="mermaid" id="mermaid-source">@Model.Mermaid</pre>
+        </div>
+        <div class="graph-legend">
+            <span class="legend-item"><span class="node-dot pending"></span> Pending</span>
+            <span class="legend-item"><span class="node-dot executing"></span> Executing</span>
+            <span class="legend-item"><span class="node-dot completed"></span> Completed</span>
+            <span class="legend-item"><span class="node-dot failed"></span> Failed</span>
+            <span class="legend-item"><span class="node-dot awaiting-approval"></span> Awaiting Approval</span>
+            <span class="legend-item"><span class="node-dot skipped"></span> Skipped</span>
+        </div>
+    </div>
+}
+else
+{
+    <div class="graph-panel empty">
+        <p>No graph data available.</p>
+    </div>
+}
