@@ -113,6 +113,99 @@ public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, Cancellation
 
 Every gated node is configurable per tenant at run time unless the author calls `.Locked()`. A locked gate is a floor, not a freeze: a tenant may still tighten it. `RawNode(...)` bindings run outside the executor pipeline and cannot be gated at all.
 
+## Hosting the framework in your own service
+
+`Abacus.Run` is a library, not an application. It brings the runtime, dispatcher, executors, middleware, in-memory store defaults, and the whole HTTP API — but no UI, no database, and no `Program.cs`. `src/Abacus.Run.Service` is the reference host that wraps it, and is the pattern to copy.
+
+### API only
+
+Reference the package, register the framework, and map the API:
+
+```csharp
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+
+builder.Services
+    .AddWorkflowHost(builder.Configuration)   // runtime, stores, API services
+    .AddBuiltInMiddleware()                   // OpenTelemetry, request logging, LLM drift
+    .AddBackgroundServices()                  // dispatcher, expiry sweeper, retention, drain
+    .AddWorkflow<OrderWorkflow>();
+
+WebApplication app = builder.Build();
+app.MapWorkflowApi();
+app.Run();
+```
+
+`AddWorkflowHost` registers every store behind `TryAdd`, so anything you register first wins. `AddBackgroundServices` is what actually executes instances — without it, instances are created and stay `Pending`.
+
+### Adding a control plane UI
+
+A UI is a separate concern layered on top. `Abacus.Run.Service` keeps that separation strictly: the control plane is Razor Pages in the host project — a dashboard, a workflow catalog, instance detail with a live graph and event stream, and an approval queue — and it reaches the runtime **only through the public HTTP API**, never by injecting `IInstanceStore` or the runner. That is what keeps the UI honest: anything the UI can do, an API client can do too.
+
+Give the host a composition root that turns the framework on and then substitutes environment-specific infrastructure:
+
+```csharp
+public static WorkflowHostBuilder AddAbacus(this IServiceCollection services, IConfiguration configuration)
+{
+    // 1. The framework, with its in-memory defaults.
+    WorkflowHostBuilder host = services
+        .AddWorkflowHost(configuration)
+        .AddBuiltInMiddleware()
+        .AddBackgroundServices();
+
+    // 2. The UI, which belongs to the deployable rather than the framework.
+    services.AddControlPlane();
+
+    // 3. Concrete infrastructure, when configured, displacing the defaults.
+    if (configuration["Abacus:SqlServer:ConnectionString"] is { Length: > 0 } sql)
+    {
+        services.AddSqlServerStores(sql, ensureDatabaseCreated: false);
+    }
+
+    if (configuration["Abacus:Redis:ConnectionString"] is { Length: > 0 } redis)
+    {
+        services.AddRedisEventBus(redis, maxStreamLength: 10_000);
+    }
+
+    return host;
+}
+```
+
+Then map the API and the UI side by side:
+
+```csharp
+builder.Services.AddProblemDetails();
+builder.Services.AddAbacus(builder.Configuration).AddWorkflow<OrderWorkflow>();
+
+WebApplication app = builder.Build();
+
+app.UseExceptionHandler();
+app.UseStatusCodePages();
+app.UseStaticFiles();
+app.UseRouting();
+
+app.MapWorkflowApi();          // from the library
+app.MapControlPlane("/control");  // your Razor Pages
+app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
+app.MapGet("/health/ready", () => Results.Ok(new { status = "ready" }));
+
+app.Run();
+```
+
+`AddControlPlane` registers the Razor Pages plus a typed `WorkflowApiClient` whose base address defaults to the origin of the request currently being served, so the UI keeps working behind a container port mapping or TLS termination instead of being pinned to one developer machine. Override it with `Abacus:ControlPlane:ApiBaseUrl` when the API is hosted separately from the UI.
+
+### Where the line falls
+
+| Concern | Lives in |
+| --- | --- |
+| Runtime, dispatch, executors, middleware, HTTP API, in-memory defaults | `Abacus.Run` |
+| Razor Pages, SQL Server stores, Redis event bus, startup wiring | your service (`Abacus.Run.Service`) |
+
+The library carries no Razor, MVC, Entity Framework, or Redis dependency, and an architecture test in the integration suite fails the build if one drifts back in. Splitting a UI host out later is therefore a matter of moving Razor and infrastructure projects, not of untangling the runtime.
+
+With neither connection string set, the whole thing runs on in-memory stores — which is what keeps local development and the integration tests dependency-free, and why that configuration is not suitable for multiple replicas or process-loss recovery. See [Configuration](#configuration).
+
+Note that the reference control plane does not yet expose the per-tenant node configuration described below; that surface is API-only today.
+
 ## API Surface
 
 ### Workflow catalog
