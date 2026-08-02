@@ -87,6 +87,32 @@ builder.Services
 
 `OrderWorkflow` must implement `IWorkflowDefinition` or `IWorkflowDefinition<TContext, TResult>`. Use `WorkflowBuildContext.Node(...)` to attach host executors and declare approval gates.
 
+### Declaring executor gates
+
+A node attached with no gate block runs autonomously. Pass a gate block to require a human decision, either always or under a predicate:
+
+```csharp
+public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken cancellationToken)
+{
+    ExecutorBinding validate = context.Node(new Validate("validate"));           // autonomous
+
+    ExecutorBinding notify = context.Node(new Notify("notify"), gate => gate
+        .Mode(ExecutionMode.RequireApproval)
+        .AssignTo("group:ops")
+        .ExpiresAfter(TimeSpan.FromHours(4)));
+
+    ExecutorBinding settle = context.Node(new Settle("settle"), gate => gate
+        .When<OrderContext>(order => order.Amount > 25_000m)
+        .Reason("RegulatedSettlement")
+        .RequireApprovers(2)
+        .Locked());                                                              // tenants may not weaken this
+
+    // ...
+}
+```
+
+Every gated node is configurable per tenant at run time unless the author calls `.Locked()`. A locked gate is a floor, not a freeze: a tenant may still tighten it. `RawNode(...)` bindings run outside the executor pipeline and cannot be gated at all.
+
 ## API Surface
 
 ### Workflow catalog
@@ -96,6 +122,58 @@ builder.Services
 - `POST /workflows/{name}/instances`
 
 The start endpoint accepts an optional `version` query parameter and supports `Idempotency-Key` and `Prefer: wait=<seconds>` headers.
+
+### Per-tenant executor configuration
+
+- `GET /workflows/{name}/versions/{version}/nodes`
+- `PUT /workflows/{name}/versions/{version}/nodes`
+- `PUT /workflows/{name}/versions/{version}/nodes/{executorId}`
+- `DELETE /workflows/{name}/versions/{version}/nodes/{executorId}`
+
+Tenants configure whether each executor of a workflow runs autonomously or waits for approval, without a redeploy. The tenant comes from `X-Tenant-Id` or the `tenant_id` claim; `version` accepts a concrete version or `latest`.
+
+`GET` lists the executor nodes the definition declares, each with its declared gate, the calling tenant's override, and the gate that will actually run:
+
+```json
+{
+  "workflowName": "order", "workflowVersion": "1.0.0", "tenantId": "acme",
+  "nodes": [{
+    "executorId": "settle", "executorType": "Settle",
+    "inputType": "OrderContext", "outputType": "OrderResult",
+    "configurable": true, "locked": false,
+    "declared":       { "mode": "autonomous",     "requiredApprovers": 1, "...": "..." },
+    "tenantOverride": { "mode": "requireApproval", "assignees": ["group:finance"], "...": "..." },
+    "effective":      { "mode": "requireApproval", "assignees": ["group:finance"], "...": "..." },
+    "effectiveSource": "tenant"
+  }]
+}
+```
+
+`PUT` writes the calling tenant's policy for one node, or for several at once via `{ "nodes": { "<executorId>": { ... } } }`. Only `mode` is required; every other field inherits the declared gate, so the body below keeps the author's assignees and expiry:
+
+```bash
+curl -X PUT http://localhost:5000/workflows/order/versions/1.0.0/nodes/settle \
+  -H 'X-Tenant-Id: acme' -H 'Content-Type: application/json' \
+  -d '{"mode":"requireApproval","requiredApprovers":2}'
+```
+
+| Field | Notes |
+| --- | --- |
+| `mode` | `autonomous` or `requireApproval`. `conditional` is code-only — its predicate cannot be expressed in JSON |
+| `reason` | Shown on the resulting approval request |
+| `assignees`, `escalationAssignees` | Principal or group identifiers |
+| `requiredApprovers` | Quorum; at least 1 |
+| `expirySeconds` | Approval window; greater than zero |
+| `onExpiry` | `deadStop`, `reject`, `autoApprove`, or `escalate` |
+| `allowModification`, `requireSegregationOfDuties` | Booleans |
+
+`DELETE` drops the override and restores the declared gate. A bulk `PUT` is all-or-nothing: if any node is unknown, not configurable, or refused, nothing is persisted.
+
+At run time the runner resolves gates for the instance's own tenant, in this order: per-instance override, tenant policy, host-wide policy (a policy written with no tenant), then the definition, then autonomous. Responses report which one applied as `effectiveSource`.
+
+A gate the author declared with `.Locked()` is a floor. Configuration may tighten it; an attempt to weaken it — downgrading `mode`, lowering `requiredApprovers`, enabling `allowModification`, disabling segregation of duties, or setting `onExpiry` to `autoApprove` — is refused with `409` and persists nothing. The runtime re-applies the floor on read as well, so a policy that reached the store by another route still cannot un-gate a locked executor.
+
+Policies are keyed by workflow **version**, since executor ids and gates change between versions. A tenant's configuration therefore does not carry forward to a new version, and `POST /instances/{id}/rerun` in restart mode creates the new instance at the *current* version — so a restart after a version bump runs under that version's configuration, or under declared defaults if the tenant has none.
 
 ### Instance operations
 

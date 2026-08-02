@@ -247,31 +247,65 @@ public sealed class InMemoryGatePolicyStore : IGatePolicyStore
     private readonly ConcurrentDictionary<string, ApprovalGate> _policies = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, ApprovalGate> _overrides = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Host-wide policies are stored under a scope no tenant id can collide with.</summary>
+    private const string HostScope = " host";
+
     public ValueTask<ApprovalGate?> FindAsync(
-        string workflowName, string workflowVersion, string executorId, string? instanceId, CancellationToken cancellationToken)
+        string? tenantId, string workflowName, string workflowVersion, string executorId, string? instanceId,
+        CancellationToken cancellationToken)
     {
-        // Per-instance override outranks the workflow-level policy.
+        // Per-instance override outranks every policy scope.
         if (instanceId is { Length: > 0 } && _overrides.TryGetValue($"{instanceId}|{executorId}", out ApprovalGate? instanceGate))
         {
             return ValueTask.FromResult<ApprovalGate?>(instanceGate);
         }
 
+        if (tenantId is { Length: > 0 } &&
+            _policies.TryGetValue(Key(tenantId, workflowName, workflowVersion, executorId), out ApprovalGate? tenantGate))
+        {
+            return ValueTask.FromResult<ApprovalGate?>(tenantGate);
+        }
+
         return ValueTask.FromResult(
-            _policies.TryGetValue($"{workflowName}|{workflowVersion}|{executorId}", out ApprovalGate? gate) ? gate : null);
+            _policies.TryGetValue(Key(null, workflowName, workflowVersion, executorId), out ApprovalGate? gate) ? gate : null);
+    }
+
+    public ValueTask<IReadOnlyDictionary<string, ApprovalGate>> ListAsync(
+        string? tenantId, string workflowName, string workflowVersion, CancellationToken cancellationToken)
+    {
+        string prefix = ScopePrefix(tenantId, workflowName, workflowVersion);
+
+        Dictionary<string, ApprovalGate> matches = _policies
+            .Where(entry => entry.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(entry => entry.Key[prefix.Length..], entry => entry.Value, StringComparer.Ordinal);
+
+        return ValueTask.FromResult<IReadOnlyDictionary<string, ApprovalGate>>(matches);
     }
 
     public ValueTask SetAsync(
-        string workflowName, string workflowVersion, string executorId, ApprovalGate gate, CancellationToken cancellationToken)
+        string? tenantId, string workflowName, string workflowVersion, string executorId, ApprovalGate gate,
+        CancellationToken cancellationToken)
     {
-        _policies[$"{workflowName}|{workflowVersion}|{executorId}"] = gate;
+        _policies[Key(tenantId, workflowName, workflowVersion, executorId)] = gate;
         return ValueTask.CompletedTask;
     }
+
+    public ValueTask<bool> RemoveAsync(
+        string? tenantId, string workflowName, string workflowVersion, string executorId,
+        CancellationToken cancellationToken)
+        => ValueTask.FromResult(_policies.TryRemove(Key(tenantId, workflowName, workflowVersion, executorId), out _));
 
     public ValueTask SetInstanceOverrideAsync(string instanceId, string executorId, ApprovalGate gate, CancellationToken cancellationToken)
     {
         _overrides[$"{instanceId}|{executorId}"] = gate;
         return ValueTask.CompletedTask;
     }
+
+    private static string ScopePrefix(string? tenantId, string workflowName, string workflowVersion)
+        => $"{(string.IsNullOrEmpty(tenantId) ? HostScope : tenantId)}|{workflowName}|{workflowVersion}|";
+
+    private static string Key(string? tenantId, string workflowName, string workflowVersion, string executorId)
+        => ScopePrefix(tenantId, workflowName, workflowVersion) + executorId;
 }
 
 public sealed class InMemoryBlobStore : IBlobStore

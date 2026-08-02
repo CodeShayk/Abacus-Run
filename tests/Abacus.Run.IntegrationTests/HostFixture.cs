@@ -177,6 +177,78 @@ public sealed class GatedOrderWorkflow : IWorkflowDefinition<OrderContext, Order
     }
 }
 
+/// <summary>
+/// Three nodes with nothing gated by default, so a tenant's configuration is the only thing that
+/// can make the run stop — except <c>settle</c>, which the author locked.
+/// </summary>
+public sealed class TenantOrderWorkflow : IWorkflowDefinition<OrderContext, OrderResult>
+{
+    private readonly SideEffectLedger _ledger;
+
+    public TenantOrderWorkflow(SideEffectLedger ledger) => _ledger = ledger;
+
+    public string Name => "tenant-order";
+    public string Version => "1.0.0";
+
+    public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken cancellationToken)
+    {
+        ExecutorBinding prepare = context.Node(new Step("prepare", _ledger, context.InstanceId));
+        ExecutorBinding dispatch = context.Node(new Step("dispatch", _ledger, context.InstanceId));
+
+        ExecutorBinding settle = context.Node(
+            new Settle("settle", _ledger, context.InstanceId),
+            gate => gate
+                .When<OrderContext>(order => order.Amount > 25_000m)
+                .Reason("RegulatedSettlement")
+                .Locked());
+
+        return new ValueTask<Workflow>(new WorkflowBuilder(prepare)
+            .AddEdge(prepare, dispatch)
+            .AddEdge(dispatch, settle)
+            .WithOutputFrom(settle)
+            .WithName(Name)
+            .Build());
+    }
+
+    private sealed class Step : HostExecutor<OrderContext, OrderContext>
+    {
+        private readonly SideEffectLedger _ledger;
+        private readonly string _instanceId;
+
+        public Step(string id, SideEffectLedger ledger, string instanceId) : base(id)
+        {
+            _ledger = ledger;
+            _instanceId = instanceId;
+        }
+
+        protected override ValueTask<OrderContext> ExecuteCoreAsync(
+            OrderContext input, IWorkflowContext context, CancellationToken cancellationToken)
+        {
+            _ledger.Record(Id, _instanceId);
+            return ValueTask.FromResult(input);
+        }
+    }
+
+    private sealed class Settle : HostExecutor<OrderContext, OrderResult>
+    {
+        private readonly SideEffectLedger _ledger;
+        private readonly string _instanceId;
+
+        public Settle(string id, SideEffectLedger ledger, string instanceId) : base(id)
+        {
+            _ledger = ledger;
+            _instanceId = instanceId;
+        }
+
+        protected override ValueTask<OrderResult> ExecuteCoreAsync(
+            OrderContext input, IWorkflowContext context, CancellationToken cancellationToken)
+        {
+            _ledger.Record(Id, _instanceId);
+            return ValueTask.FromResult(new OrderResult(input.OrderId, "settled"));
+        }
+    }
+}
+
 public sealed class HostFixture : WebApplicationFactory<Program>
 {
     public SideEffectLedger Ledger { get; } = new();
@@ -188,6 +260,7 @@ public sealed class HostFixture : WebApplicationFactory<Program>
             services.AddSingleton(Ledger);
             services.AddSingleton<IWorkflowDefinition>(sp => new OrderWorkflow(sp.GetRequiredService<SideEffectLedger>()));
             services.AddSingleton<IWorkflowDefinition>(sp => new GatedOrderWorkflow(sp.GetRequiredService<SideEffectLedger>()));
+            services.AddSingleton<IWorkflowDefinition>(sp => new TenantOrderWorkflow(sp.GetRequiredService<SideEffectLedger>()));
         });
 
         return base.CreateHost(builder);
@@ -230,7 +303,7 @@ public sealed class HostFixture : WebApplicationFactory<Program>
     }
 
     public async Task<string> StartAsync(
-        HttpClient client, string workflow, object context, string? idempotencyKey = null)
+        HttpClient client, string workflow, object context, string? idempotencyKey = null, string? tenantId = null)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, $"/workflows/{workflow}/instances")
         {
@@ -240,6 +313,11 @@ public sealed class HostFixture : WebApplicationFactory<Program>
         if (idempotencyKey is not null)
         {
             request.Headers.Add("Idempotency-Key", idempotencyKey);
+        }
+
+        if (tenantId is not null)
+        {
+            request.Headers.Add("X-Tenant-Id", tenantId);
         }
 
         HttpResponseMessage response = await client.SendAsync(request);
