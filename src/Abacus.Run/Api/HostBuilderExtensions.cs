@@ -135,6 +135,13 @@ public static class HostBuilderExtensions
         // Runtime
         services.TryAddSingleton<IWorkflowRegistry>(sp =>
             new WorkflowRegistry(sp.GetServices<IWorkflowDefinition>()));
+        services.TryAddSingleton<IWorkflowInspector>(sp => new WorkflowInspector(sp));
+        services.TryAddSingleton<IGateConfigurationService>(sp => new GateConfigurationService(
+            sp.GetRequiredService<IWorkflowRegistry>(),
+            sp.GetRequiredService<IWorkflowInspector>(),
+            sp.GetRequiredService<IGatePolicyStore>(),
+            sp.GetService<IAuditStore>(),
+            sp.GetRequiredService<TimeProvider>()));
         services.TryAddSingleton(sp => new MiddlewarePipelineFactory(
             sp.GetServices<IExecutorMiddleware>(), sp.GetServices<IWorkflowMiddleware>()));
         services.TryAddSingleton<IApprovalService, ApprovalCoordinator>();

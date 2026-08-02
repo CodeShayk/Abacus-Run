@@ -112,14 +112,32 @@ public interface IApprovalStore
     ValueTask CancelForInstanceAsync(string instanceId, CancellationToken cancellationToken);
 }
 
-/// <summary>Runtime-editable gate policy (PRD FR-9.2), keyed by workflow/version/executor.</summary>
+/// <summary>
+/// Runtime-editable gate policy (PRD FR-9.2), keyed by tenant/workflow/version/executor.
+/// </summary>
+/// <remarks>
+/// A null <c>tenantId</c> addresses the host-wide policy, which applies to every tenant that has no
+/// policy of its own. Resolution order in <see cref="FindAsync"/> is: per-instance override, the
+/// tenant's own policy, the host-wide policy, then nothing — leaving the definition's gate to stand.
+/// </remarks>
 public interface IGatePolicyStore
 {
     ValueTask<ApprovalGate?> FindAsync(
-        string workflowName, string workflowVersion, string executorId, string? instanceId, CancellationToken cancellationToken);
+        string? tenantId, string workflowName, string workflowVersion, string executorId, string? instanceId,
+        CancellationToken cancellationToken);
+
+    /// <summary>Policies written at exactly this scope, by executor id. Never merged with another scope.</summary>
+    ValueTask<IReadOnlyDictionary<string, ApprovalGate>> ListAsync(
+        string? tenantId, string workflowName, string workflowVersion, CancellationToken cancellationToken);
 
     ValueTask SetAsync(
-        string workflowName, string workflowVersion, string executorId, ApprovalGate gate, CancellationToken cancellationToken);
+        string? tenantId, string workflowName, string workflowVersion, string executorId, ApprovalGate gate,
+        CancellationToken cancellationToken);
+
+    /// <summary>Drops the policy at this scope. Returns false when there was nothing to drop.</summary>
+    ValueTask<bool> RemoveAsync(
+        string? tenantId, string workflowName, string workflowVersion, string executorId,
+        CancellationToken cancellationToken);
 
     ValueTask SetInstanceOverrideAsync(string instanceId, string executorId, ApprovalGate gate, CancellationToken cancellationToken);
 }

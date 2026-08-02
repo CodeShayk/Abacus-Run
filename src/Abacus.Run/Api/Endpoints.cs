@@ -107,6 +107,65 @@ public static class Endpoints
                     })
                 });
         });
+
+        MapNodeConfiguration(app);
+    }
+
+    /// <summary>
+    /// The executor nodes of one workflow version, and the tenant's execution policy over them.
+    /// Nodes are autonomous unless the definition declared a gate or the tenant configured one.
+    /// </summary>
+    private static void MapNodeConfiguration(IEndpointRouteBuilder app)
+    {
+        app.MapGet("/workflows/{name}/versions/{version}/nodes", async (
+            string name, string version, HttpContext http, IGateConfigurationService config, CancellationToken cancellationToken) =>
+            (await config.GetNodesAsync(name, version, http.TenantId(), cancellationToken).ConfigureAwait(false))
+                .ToHttpResult());
+
+        app.MapPut("/workflows/{name}/versions/{version}/nodes", async (
+            string name, string version, NodeConfigurationRequestDto? body, HttpContext http,
+            IGateConfigurationService config, CancellationToken cancellationToken) =>
+        {
+            if (body?.Nodes is null)
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["nodes"] = ["A map of executor id to policy is required."]
+                });
+            }
+
+            return (await config
+                .SetNodesAsync(name, version, http.TenantId(), body.Nodes, http.User, cancellationToken)
+                .ConfigureAwait(false))
+                .ToHttpResult();
+        });
+
+        app.MapPut("/workflows/{name}/versions/{version}/nodes/{executorId}", async (
+            string name, string version, string executorId, ExecutionPolicyDto? body, HttpContext http,
+            IGateConfigurationService config, CancellationToken cancellationToken) =>
+        {
+            if (body is null)
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["mode"] = ["A policy body is required."]
+                });
+            }
+
+            return (await config
+                .SetNodesAsync(name, version, http.TenantId(),
+                    new Dictionary<string, ExecutionPolicyDto> { [executorId] = body }, http.User, cancellationToken)
+                .ConfigureAwait(false))
+                .ToHttpResult();
+        });
+
+        app.MapDelete("/workflows/{name}/versions/{version}/nodes/{executorId}", async (
+            string name, string version, string executorId, HttpContext http,
+            IGateConfigurationService config, CancellationToken cancellationToken) =>
+            (await config
+                .ResetNodeAsync(name, version, http.TenantId(), executorId, http.User, cancellationToken)
+                .ConfigureAwait(false))
+                .ToHttpResult());
     }
 
     private static void MapInstances(IEndpointRouteBuilder app)
@@ -434,6 +493,21 @@ public static class Endpoints
         approval.ApprovalId, approval.InstanceId, approval.ExecutorId, approval.Reason, approval.State.ToString(),
         approval.Assignees, approval.RequiredApprovers, approval.AllowModification, approval.CreatedAt,
         approval.ExpiresAt, $"/approvals/{approval.ApprovalId}/decision");
+
+    public static IResult ToHttpResult(this GateConfigResult result) => result.Kind switch
+    {
+        GateConfigResultKind.Ok => Results.Ok(result.Nodes),
+        GateConfigResultKind.UnknownWorkflow => Results.NotFound(),
+        GateConfigResultKind.UnknownExecutor => Results.Problem(
+            title: "Unknown executor", detail: result.Detail, statusCode: StatusCodes.Status404NotFound),
+        GateConfigResultKind.NotConfigurable => Results.Problem(
+            title: "Executor is not configurable", detail: result.Detail, statusCode: StatusCodes.Status400BadRequest),
+        GateConfigResultKind.Rejected => Results.Problem(
+            title: "Policy rejected by the workflow definition", detail: result.Detail,
+            statusCode: StatusCodes.Status409Conflict),
+        _ => Results.ValidationProblem(
+            result.Errors?.ToDictionary(kv => kv.Key, kv => kv.Value) ?? new Dictionary<string, string[]>())
+    };
 
     public static IResult ToHttpResult(this ControlResult result) => result.Kind switch
     {

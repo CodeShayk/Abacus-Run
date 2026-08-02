@@ -17,6 +17,7 @@ This page is the repository-level technical wiki. It documents the implementatio
 - [Retries and failure classification](#retries-and-failure-classification)
 - [Checkpoints and resumption](#checkpoints-and-resumption)
 - [Human approval gates](#human-approval-gates)
+- [Tenant executor configuration](#tenant-executor-configuration)
 - [Events, history, and SSE](#events-history-and-sse)
 - [HTTP API](#http-api)
 - [Configuration](#configuration)
@@ -491,6 +492,48 @@ Decision outcomes are `Approve`, `Reject`, and `ApproveWithModification`. Modifi
 
 Expiry actions are `DeadStop`, `Reject`, `AutoApprove`, and `Escalate`. Approval decisions enforce assignees, quorum, and optional segregation of duties.
 
+A gate may also be declared with `.Locked()`, which prevents tenant configuration from weakening it. See [Tenant executor configuration](#tenant-executor-configuration).
+
+## Tenant executor configuration
+
+The gate declared in code is a default, not a fixed setting. Each tenant decides whether an executor runs autonomously or waits for approval, through the API and without a redeploy. An executor attached with `context.Node(executor)` and no gate block is autonomous for every tenant until someone changes it.
+
+### Resolving the effective gate
+
+The runner resolves each executor's gate for the instance's own tenant, highest precedence first:
+
+| Precedence | Scope | Written by |
+| --- | --- | --- |
+| 1 | Per-instance override | `IGatePolicyStore.SetInstanceOverrideAsync` |
+| 2 | Tenant policy | `PUT /workflows/{name}/versions/{version}/nodes` with a tenant |
+| 3 | Host-wide policy | `IGatePolicyStore.SetAsync` with a null tenant |
+| 4 | Workflow definition | The gate block in `BuildAsync` |
+| 5 | Host default | `ExecutionMode.Autonomous` |
+
+A policy-store failure falls back to the definition's gate, never to autonomous: a lookup error must not un-gate a protected executor. `GET` responses report which scope applied as `effectiveSource` (`tenant`, `host`, or `definition`).
+
+### Locked gates
+
+`.Locked()` marks a declared gate as the author's floor. Tenant configuration may still tighten it, but any of the following is refused with `409` and persists nothing:
+
+- Downgrading `Mode` (`RequireApproval` or `Conditional` to `Autonomous`, or `RequireApproval` to `Conditional`).
+- Lowering `RequiredApprovers` below the declared quorum.
+- Enabling `AllowModification` where the declaration disabled it.
+- Disabling `RequireSegregationOfDuties` where the declaration required it.
+- Setting `OnExpiry` to `AutoApprove` where the declaration did not.
+
+The same rules are re-applied when the gate is read at execution time, so a policy that reached the store before the gate was locked — or through a store client rather than the API — still cannot un-gate the executor. A locked `Conditional` gate also keeps its predicate, because a predicate is code and no stored policy can supply one.
+
+### Scope and lifetime
+
+Policies are keyed by tenant, workflow name, and workflow **version**, because executor ids and gates change between versions. A tenant's configuration does not carry forward when a new version is registered; instances of the new version run under its declared defaults until configured. `POST /instances/{id}/rerun` in restart mode creates the new instance at the current version, so a restart after a version bump uses that version's configuration.
+
+Configuration writes are recorded in the audit store as `gate.policy.set` and `gate.policy.reset`, with the actor, tenant, workflow, version, and executor.
+
+### Discovering nodes
+
+`GET /workflows/{name}/versions/{version}/nodes` builds the definition once against an inspection context — attaching nothing to a runtime and running no executor — and caches the result per version. Each node reports its executor id, implementation type, input and output types, whether it is configurable, whether it is locked, and its declared, tenant, and effective gates. `RawNode(...)` bindings are listed with `configurable: false`; they run outside the executor middleware pipeline and cannot be approval-gated.
+
 ## Events, history, and SSE
 
 Every instance event has a monotonically increasing per-instance `Sequence`. The same sequence is used as the SSE event ID, which lets clients reconnect with `Last-Event-ID` and request replay from the same cursor.
@@ -543,6 +586,27 @@ A start request body contains a workflow-specific context object. Optional reque
 - Tenant and correlation values supplied through the host's request metadata conventions.
 
 A successful asynchronous start returns `202 Accepted` and a location such as `/instances/{id}`. Unknown workflows return `404`; invalid context returns `400` with field errors.
+
+### Executor nodes and tenant policy
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/workflows/{name}/versions/{version}/nodes` | List executor nodes with declared, tenant, and effective gates |
+| `PUT` | `/workflows/{name}/versions/{version}/nodes` | Configure several nodes in one all-or-nothing write |
+| `PUT` | `/workflows/{name}/versions/{version}/nodes/{executorId}` | Configure one node |
+| `DELETE` | `/workflows/{name}/versions/{version}/nodes/{executorId}` | Drop the tenant's override for one node |
+
+The tenant is taken from the `X-Tenant-Id` header or the `tenant_id` claim. `version` accepts a concrete version or `latest`.
+
+A policy body requires `mode` (`autonomous` or `requireApproval`; `conditional` is code-only) and optionally `reason`, `assignees`, `requiredApprovers`, `expirySeconds`, `onExpiry`, `escalationAssignees`, `allowModification`, and `requireSegregationOfDuties`. Omitted fields inherit the declared gate.
+
+```bash
+curl -X PUT http://localhost:5000/workflows/order/versions/1.0.0/nodes/submit-payment \
+  -H 'X-Tenant-Id: acme' -H 'Content-Type: application/json' \
+  -d '{"mode":"requireApproval","assignees":["group:finance"],"requiredApprovers":2}'
+```
+
+Unknown workflow, version, or executor returns `404`. A raw node or an unsupported mode returns `400`. A policy that would weaken a locked gate returns `409`. See [Tenant executor configuration](#tenant-executor-configuration) for precedence and locking rules.
 
 ### Instances and diagnostics
 
@@ -672,7 +736,9 @@ The built-in request/response logging middleware samples bodies and applies an a
 
 ### Tenancy and authorization
 
-Instances and approvals carry a tenant identifier. The API and store implementations must enforce tenant isolation at the request boundary and persistence boundary. The in-memory reference stores model the contract but are not a replacement for a production identity and authorization system.
+Instances, approvals, and gate policies carry a tenant identifier. The API and store implementations must enforce tenant isolation at the request boundary and persistence boundary. The in-memory reference stores model the contract but are not a replacement for a production identity and authorization system.
+
+Because gate policies decide whether an executor runs without a human decision, the node configuration endpoints are privileged: authorize them for tenant administrators rather than for anyone who can start an instance. The host derives the tenant from `X-Tenant-Id` when no `tenant_id` claim is present, which is a development convenience — in production, bind the tenant to the authenticated principal so a caller cannot configure another tenant's workflows by setting a header.
 
 ### Secrets
 
@@ -862,6 +928,8 @@ Implement `IWorkflowMiddleware` for run-wide behavior or `IExecutorMiddleware` f
 
 Provide an `IGatePolicyStore` implementation when approval requirements depend on tenant, workflow, executor, amount, role, or environment. Keep policy evaluation deterministic and observable.
 
+`FindAsync` resolves one executor's gate for a tenant and must itself apply the scope precedence — per-instance override, then the tenant's policy, then the host-wide policy stored under a null tenant — returning `null` when no policy exists so the definition's gate stands. `ListAsync` returns exactly one scope's entries without merging, which is what lets the API show a tenant's own overrides separately from the host default. The locked-gate floor is enforced by the runtime on top of whatever the store returns, so a custom implementation cannot accidentally weaken a protected executor.
+
 ### Custom event sinks and buses
 
 The runner publishes through `IEventSink`. A sink may persist the event, relay it to an event bus, or do both. Preserve the per-instance sequence when forwarding to SSE or external consumers.
@@ -918,6 +986,14 @@ Check that `AddBackgroundServices()` is registered and that the dispatcher is ru
 ### An approval does not resume the instance
 
 Inspect the approval state, decision authorization, quorum, expiry, and instance status. A successful decision wakes the instance by moving it to a claimable state; the dispatcher must be running to execute the resumed run.
+
+### An executor pauses for approval although the definition left it autonomous
+
+A tenant or host-wide policy is gating it. Call `GET /workflows/{name}/versions/{version}/nodes` as that tenant and read `effectiveSource`: `tenant` means the tenant configured it, `host` means a host-wide policy applies. `DELETE` the node's override to restore the declared gate. Remember the policy is version-scoped — check the version the instance actually pinned, not the latest.
+
+### A tenant's configuration appears to be ignored
+
+Confirm the tenant used to configure the workflow is the tenant the instance runs under; the runner resolves gates for `instance.TenantId`, not for the caller who last edited the policy. Also check the instance's workflow version against the version the policy was written for, and whether a per-instance override outranks it.
 
 ### An outbound call is blocked
 

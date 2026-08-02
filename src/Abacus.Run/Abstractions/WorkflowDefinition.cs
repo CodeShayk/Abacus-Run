@@ -28,6 +28,22 @@ public interface IWorkflowDefinition<TContext, TResult> : IWorkflowDefinition
 }
 
 /// <summary>
+/// One executor node of a workflow graph as the definition declared it. Produced during a build and
+/// surfaced by the catalog API so a tenant can see what there is to configure.
+/// </summary>
+/// <remarks>
+/// <c>Configurable</c> is false for <see cref="WorkflowBuildContext.RawNode"/> bindings: they run
+/// outside the host executor pipeline and therefore cannot carry an approval gate at all.
+/// </remarks>
+public sealed record WorkflowNodeDescriptor(
+    string ExecutorId,
+    string ExecutorType,
+    string? InputType,
+    string? OutputType,
+    ApprovalGate DeclaredGate,
+    bool Configurable);
+
+/// <summary>
 /// Supplied to <see cref="IWorkflowDefinition.BuildAsync"/>. The single place approval gates are
 /// declared and the only supported way to attach an executor to the host runtime.
 /// </summary>
@@ -63,7 +79,14 @@ public sealed class WorkflowBuildContext
     /// <summary>Gates declared during this build, by executor id. Read by the runtime.</summary>
     public IReadOnlyDictionary<string, ApprovalGate> Gates => _gates;
 
+    /// <summary>
+    /// Every node attached during this build, in declaration order. Read by the catalog API to
+    /// describe what a tenant may configure.
+    /// </summary>
+    public IReadOnlyList<WorkflowNodeDescriptor> Nodes => _nodes;
+
     private readonly Dictionary<string, ApprovalGate> _gates = [];
+    private readonly List<WorkflowNodeDescriptor> _nodes = [];
 
     /// <summary>
     /// Attaches a host executor: wires the middleware pipeline, the gate, and the instance runtime,
@@ -82,6 +105,10 @@ public sealed class WorkflowBuildContext
         }
 
         _gates[executor.Id] = configured;
+        Record(new WorkflowNodeDescriptor(
+            executor.Id, executor.GetType().Name, executor.InputType.Name, executor.OutputType.Name,
+            configured, Configurable: true));
+
         return _attach(executor, configured);
     }
 
@@ -100,12 +127,30 @@ public sealed class WorkflowBuildContext
                 "Approval gates require a HostExecutor<TIn, TOut>; convert the executor or remove the gate.");
         }
 
+        Record(new WorkflowNodeDescriptor(
+            binding.Id, binding.GetType().Name, null, null, ApprovalGate.Autonomous, Configurable: false));
+
         return binding;
     }
 
+    /// <summary>Last declaration of an id wins, matching how <see cref="Gates"/> is built.</summary>
+    private void Record(WorkflowNodeDescriptor node)
+    {
+        int existing = _nodes.FindIndex(n => string.Equals(n.ExecutorId, node.ExecutorId, StringComparison.Ordinal));
+        if (existing >= 0)
+        {
+            _nodes[existing] = node;
+        }
+        else
+        {
+            _nodes.Add(node);
+        }
+    }
+
     /// <summary>Build context for read-only inspection (graph rendering), with no runtime attachment.</summary>
-    public static WorkflowBuildContext ForInspection(string workflowName, string workflowVersion)
-        => new("inspection", "inspection", workflowName, workflowVersion, 0, null,
+    public static WorkflowBuildContext ForInspection(
+        string workflowName, string workflowVersion, IServiceProvider? services = null)
+        => new("inspection", "inspection", workflowName, workflowVersion, 0, services,
             (executor, _) =>
             {
                 executor.Runtime = HostExecutorRuntime.Unattached;

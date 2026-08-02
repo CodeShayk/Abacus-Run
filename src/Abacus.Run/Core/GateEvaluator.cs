@@ -8,9 +8,11 @@ namespace Abacus.Run.Core;
 /// or fails.
 /// </summary>
 /// <remarks>
-/// Precedence (highest first): per-instance override, runtime policy store, workflow definition,
-/// host default (<see cref="ExecutionMode.Autonomous"/>). A policy-store failure falls back to the
-/// definition's gate — never to Autonomous, which would silently un-gate a protected executor.
+/// Precedence (highest first): per-instance override, the running tenant's policy, the host-wide
+/// policy, the workflow definition, host default (<see cref="ExecutionMode.Autonomous"/>). A
+/// policy-store failure falls back to the definition's gate — never to Autonomous, which would
+/// silently un-gate a protected executor. A policy that would loosen a gate the definition marked
+/// <see cref="ApprovalGate.Locked"/> is re-tightened by <see cref="GatePolicyRules.Reconcile"/>.
 /// </remarks>
 public sealed class GateEvaluator : IGateEvaluator
 {
@@ -19,16 +21,19 @@ public sealed class GateEvaluator : IGateEvaluator
     private readonly IApprovalStore? _approvalStore;
     private readonly string _workflowName;
     private readonly string _workflowVersion;
+    private readonly string? _tenantId;
 
     public GateEvaluator(
         string workflowName,
         string workflowVersion,
+        string? tenantId,
         IReadOnlyDictionary<string, ApprovalGate> definitionGates,
         IGatePolicyStore? policyStore = null,
         IApprovalStore? approvalStore = null)
     {
         _workflowName = workflowName;
         _workflowVersion = workflowVersion;
+        _tenantId = tenantId;
         _definitionGates = definitionGates ?? new Dictionary<string, ApprovalGate>();
         _policyStore = policyStore;
         _approvalStore = approvalStore;
@@ -142,10 +147,10 @@ public sealed class GateEvaluator : IGateEvaluator
         try
         {
             ApprovalGate? policy = await _policyStore
-                .FindAsync(_workflowName, _workflowVersion, executorId, instanceId, cancellationToken)
+                .FindAsync(_tenantId, _workflowName, _workflowVersion, executorId, instanceId, cancellationToken)
                 .ConfigureAwait(false);
 
-            return policy ?? definitionGate;
+            return policy is null ? definitionGate : GatePolicyRules.Reconcile(definitionGate, policy);
         }
         catch
         {
