@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Abacus.Run.Abstractions;
 
 /// <summary>Whether an executor runs on its own or pauses for a human decision (PRD FR-9.1).</summary>
@@ -43,6 +45,11 @@ public sealed record ApprovalGate
     public ExecutionMode Mode { get; init; } = ExecutionMode.Autonomous;
 
     /// <summary>Evaluated only when <see cref="Mode"/> is <see cref="ExecutionMode.Conditional"/>.</summary>
+    /// <remarks>
+    /// Never serialized: gates round-trip through the policy store as data, and a predicate only
+    /// exists on the gate the definition itself declared.
+    /// </remarks>
+    [JsonIgnore]
     public Func<object, ValueTask<bool>>? Predicate { get; init; }
 
     public string? Reason { get; init; }
@@ -53,6 +60,13 @@ public sealed record ApprovalGate
     public IReadOnlyList<string> EscalationAssignees { get; init; } = [];
     public bool AllowModification { get; init; }
     public bool RequireSegregationOfDuties { get; init; }
+
+    /// <summary>
+    /// Marks this gate as the author's floor. Tenant configuration may still tighten a locked gate,
+    /// but may never loosen it — the API rejects such a write and the evaluator re-tightens anything
+    /// that reached the policy store by another route.
+    /// </summary>
+    public bool Locked { get; init; }
 }
 
 public sealed class ApprovalGateBuilder
@@ -125,6 +139,13 @@ public sealed class ApprovalGateBuilder
     public ApprovalGateBuilder RequireSegregationOfDuties(bool require = true)
     {
         _gate = _gate with { RequireSegregationOfDuties = require };
+        return this;
+    }
+
+    /// <summary>Forbids tenant configuration from loosening this gate (PRD FR-9.2).</summary>
+    public ApprovalGateBuilder Locked(bool locked = true)
+    {
+        _gate = _gate with { Locked = locked };
         return this;
     }
 

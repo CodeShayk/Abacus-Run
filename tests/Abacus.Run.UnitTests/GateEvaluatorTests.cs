@@ -11,8 +11,9 @@ public class GateEvaluatorTests
     private static GateEvaluator Build(
         ApprovalGate? definitionGate = null,
         IGatePolicyStore? policies = null,
-        IApprovalStore? approvals = null)
-        => new("wf", "1.0.0",
+        IApprovalStore? approvals = null,
+        string? tenantId = "tenant-a")
+        => new("wf", "1.0.0", tenantId,
             definitionGate is null
                 ? new Dictionary<string, ApprovalGate>()
                 : new Dictionary<string, ApprovalGate> { ["pay"] = definitionGate },
@@ -81,7 +82,7 @@ public class GateEvaluatorTests
     public async Task Policy_store_overrides_the_definition_gate()
     {
         var policies = new InMemoryGatePolicyStore();
-        await policies.SetAsync("wf", "1.0.0", "pay",
+        await policies.SetAsync(null, "wf", "1.0.0", "pay",
             new ApprovalGate { Mode = ExecutionMode.RequireApproval, Reason = "promoted at runtime" }, default);
 
         // An executor the definition left autonomous becomes gated with no redeploy.
@@ -96,7 +97,7 @@ public class GateEvaluatorTests
     public async Task Instance_override_outranks_the_workflow_policy()
     {
         var policies = new InMemoryGatePolicyStore();
-        await policies.SetAsync("wf", "1.0.0", "pay", new ApprovalGate { Mode = ExecutionMode.RequireApproval }, default);
+        await policies.SetAsync(null, "wf", "1.0.0", "pay", new ApprovalGate { Mode = ExecutionMode.RequireApproval }, default);
         await policies.SetInstanceOverrideAsync("i1", "pay", ApprovalGate.Autonomous, default);
 
         (await Build(ApprovalGate.Autonomous, policies).EvaluateAsync("i1", "pay", new Payload(), default))
@@ -104,6 +105,87 @@ public class GateEvaluatorTests
 
         (await Build(ApprovalGate.Autonomous, policies).EvaluateAsync("i2", "pay", new Payload(), default))
             .Kind.Should().Be(GateOutcomeKind.Pause, "a different instance still sees the workflow policy");
+    }
+
+    [Fact]
+    public async Task Tenant_policy_outranks_the_host_wide_policy()
+    {
+        var policies = new InMemoryGatePolicyStore();
+        await policies.SetAsync(null, "wf", "1.0.0", "pay",
+            new ApprovalGate { Mode = ExecutionMode.RequireApproval, Reason = "host default" }, default);
+        await policies.SetAsync("tenant-a", "wf", "1.0.0", "pay", ApprovalGate.Autonomous, default);
+
+        (await Build(ApprovalGate.Autonomous, policies, tenantId: "tenant-a")
+            .EvaluateAsync("i1", "pay", new Payload(), default))
+            .Kind.Should().Be(GateOutcomeKind.Proceed);
+
+        (await Build(ApprovalGate.Autonomous, policies, tenantId: "tenant-b")
+            .EvaluateAsync("i2", "pay", new Payload(), default))
+            .Kind.Should().Be(GateOutcomeKind.Pause, "a tenant without its own policy falls back to the host default");
+    }
+
+    [Fact]
+    public async Task One_tenants_policy_does_not_leak_into_another()
+    {
+        var policies = new InMemoryGatePolicyStore();
+        await policies.SetAsync("tenant-a", "wf", "1.0.0", "pay",
+            new ApprovalGate { Mode = ExecutionMode.RequireApproval, Reason = "tenant a is cautious" }, default);
+
+        (await Build(ApprovalGate.Autonomous, policies, tenantId: "tenant-a")
+            .EvaluateAsync("i1", "pay", new Payload(), default))
+            .Kind.Should().Be(GateOutcomeKind.Pause);
+
+        (await Build(ApprovalGate.Autonomous, policies, tenantId: "tenant-b")
+            .EvaluateAsync("i2", "pay", new Payload(), default))
+            .Kind.Should().Be(GateOutcomeKind.Proceed, "tenant b never configured this executor");
+    }
+
+    [Fact]
+    public async Task Policy_cannot_un_gate_an_executor_the_definition_locked()
+    {
+        var declared = new ApprovalGate { Mode = ExecutionMode.RequireApproval, Reason = "sox", Locked = true };
+
+        var policies = new InMemoryGatePolicyStore();
+        await policies.SetAsync("tenant-a", "wf", "1.0.0", "pay", ApprovalGate.Autonomous, default);
+
+        (await Build(declared, policies, tenantId: "tenant-a").EvaluateAsync("i1", "pay", new Payload(), default))
+            .Kind.Should().Be(GateOutcomeKind.Pause, "a locked gate is the author's floor");
+    }
+
+    [Fact]
+    public async Task Policy_may_still_tighten_a_locked_gate()
+    {
+        var declared = new ApprovalGate { Mode = ExecutionMode.Autonomous, Locked = true };
+
+        var policies = new InMemoryGatePolicyStore();
+        await policies.SetAsync("tenant-a", "wf", "1.0.0", "pay",
+            new ApprovalGate { Mode = ExecutionMode.RequireApproval, Reason = "tenant wants eyes on this" }, default);
+
+        GateOutcome outcome = await Build(declared, policies, tenantId: "tenant-a")
+            .EvaluateAsync("i1", "pay", new Payload(), default);
+
+        outcome.Kind.Should().Be(GateOutcomeKind.Pause);
+        outcome.Gate!.Reason.Should().Be("tenant wants eyes on this");
+    }
+
+    [Fact]
+    public async Task Locked_conditional_gate_keeps_its_predicate_when_a_policy_tries_to_un_gate_it()
+    {
+        ApprovalGate declared = new ApprovalGateBuilder()
+            .When<Payload>(p => p.Amount > 25_000m)
+            .Locked()
+            .Build();
+
+        var policies = new InMemoryGatePolicyStore();
+        await policies.SetAsync("tenant-a", "wf", "1.0.0", "pay", ApprovalGate.Autonomous, default);
+
+        GateEvaluator evaluator = Build(declared, policies, tenantId: "tenant-a");
+
+        (await evaluator.EvaluateAsync("i1", "pay", new Payload(Amount: 100m), default))
+            .Kind.Should().Be(GateOutcomeKind.Proceed);
+
+        (await evaluator.EvaluateAsync("i2", "pay", new Payload(Amount: 50_000m), default))
+            .Kind.Should().Be(GateOutcomeKind.Pause, "the predicate survives the attempted downgrade");
     }
 
     [Fact]
@@ -249,12 +331,23 @@ public class GateEvaluatorTests
     private sealed class ThrowingPolicyStore : IGatePolicyStore
     {
         public ValueTask<ApprovalGate?> FindAsync(
-            string workflowName, string workflowVersion, string executorId, string? instanceId, CancellationToken cancellationToken)
+            string? tenantId, string workflowName, string workflowVersion, string executorId, string? instanceId,
+            CancellationToken cancellationToken)
+            => throw new InvalidOperationException("policy store unavailable");
+
+        public ValueTask<IReadOnlyDictionary<string, ApprovalGate>> ListAsync(
+            string? tenantId, string workflowName, string workflowVersion, CancellationToken cancellationToken)
             => throw new InvalidOperationException("policy store unavailable");
 
         public ValueTask SetAsync(
-            string workflowName, string workflowVersion, string executorId, ApprovalGate gate, CancellationToken cancellationToken)
+            string? tenantId, string workflowName, string workflowVersion, string executorId, ApprovalGate gate,
+            CancellationToken cancellationToken)
             => ValueTask.CompletedTask;
+
+        public ValueTask<bool> RemoveAsync(
+            string? tenantId, string workflowName, string workflowVersion, string executorId,
+            CancellationToken cancellationToken)
+            => ValueTask.FromResult(false);
 
         public ValueTask SetInstanceOverrideAsync(
             string instanceId, string executorId, ApprovalGate gate, CancellationToken cancellationToken)

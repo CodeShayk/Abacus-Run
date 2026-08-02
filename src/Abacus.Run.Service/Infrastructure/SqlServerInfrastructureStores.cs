@@ -99,19 +99,68 @@ public sealed class SqlServerBlobStore(IDbContextFactory<AbacusDbContext> factor
 
 public sealed class SqlServerGatePolicyStore(IDbContextFactory<AbacusDbContext> factory) : IGatePolicyStore
 {
-    public async ValueTask<ApprovalGate?> FindAsync(string workflowName, string workflowVersion, string executorId, string? instanceId, CancellationToken cancellationToken)
+    private const string HostScope = "*";
+
+    public async ValueTask<ApprovalGate?> FindAsync(string? tenantId, string workflowName, string workflowVersion, string executorId, string? instanceId, CancellationToken cancellationToken)
     {
+        // Highest scope first, falling through to the next when nothing is stored at that level.
+        var keys = new List<string>(3);
+        if (instanceId is { Length: > 0 }) keys.Add($"gate-instance:{instanceId}:{executorId}");
+        if (tenantId is { Length: > 0 }) keys.Add(PolicyKey(tenantId, workflowName, workflowVersion, executorId));
+        keys.Add(PolicyKey(null, workflowName, workflowVersion, executorId));
+
         await using AbacusDbContext db = await factory.CreateDbContextAsync(cancellationToken);
-        string key = instanceId is null ? $"gate:{workflowName}:{workflowVersion}:{executorId}" : $"gate-instance:{instanceId}:{executorId}";
-        JsonRow? row = await db.JsonRows.AsNoTracking().SingleOrDefaultAsync(item => item.Kind == "gate" && item.Key == key, cancellationToken);
-        return row is null ? null : JsonSerializer.Deserialize<ApprovalGate>(row.Payload);
+        List<JsonRow> rows = await db.JsonRows.AsNoTracking()
+            .Where(item => item.Kind == "gate" && keys.Contains(item.Key))
+            .ToListAsync(cancellationToken);
+
+        foreach (string key in keys)
+        {
+            JsonRow? row = rows.Find(item => item.Key == key);
+            if (row is not null) return JsonSerializer.Deserialize<ApprovalGate>(row.Payload);
+        }
+
+        return null;
     }
 
-    public ValueTask SetAsync(string workflowName, string workflowVersion, string executorId, ApprovalGate gate, CancellationToken cancellationToken)
-        => SetCoreAsync($"gate:{workflowName}:{workflowVersion}:{executorId}", gate, cancellationToken);
+    public async ValueTask<IReadOnlyDictionary<string, ApprovalGate>> ListAsync(string? tenantId, string workflowName, string workflowVersion, CancellationToken cancellationToken)
+    {
+        string prefix = PolicyKey(tenantId, workflowName, workflowVersion, string.Empty);
+
+        await using AbacusDbContext db = await factory.CreateDbContextAsync(cancellationToken);
+        List<JsonRow> rows = await db.JsonRows.AsNoTracking()
+            .Where(item => item.Kind == "gate" && item.Key.StartsWith(prefix))
+            .ToListAsync(cancellationToken);
+
+        var gates = new Dictionary<string, ApprovalGate>(StringComparer.Ordinal);
+        foreach (JsonRow row in rows)
+        {
+            ApprovalGate? gate = JsonSerializer.Deserialize<ApprovalGate>(row.Payload);
+            if (gate is not null) gates[row.Key[prefix.Length..]] = gate;
+        }
+
+        return gates;
+    }
+
+    public ValueTask SetAsync(string? tenantId, string workflowName, string workflowVersion, string executorId, ApprovalGate gate, CancellationToken cancellationToken)
+        => SetCoreAsync(PolicyKey(tenantId, workflowName, workflowVersion, executorId), gate, cancellationToken);
+
+    public async ValueTask<bool> RemoveAsync(string? tenantId, string workflowName, string workflowVersion, string executorId, CancellationToken cancellationToken)
+    {
+        string key = PolicyKey(tenantId, workflowName, workflowVersion, executorId);
+        await using AbacusDbContext db = await factory.CreateDbContextAsync(cancellationToken);
+        JsonRow? row = await db.JsonRows.SingleOrDefaultAsync(item => item.Kind == "gate" && item.Key == key, cancellationToken);
+        if (row is null) return false;
+        db.JsonRows.Remove(row);
+        await db.SaveChangesAsync(cancellationToken);
+        return true;
+    }
 
     public ValueTask SetInstanceOverrideAsync(string instanceId, string executorId, ApprovalGate gate, CancellationToken cancellationToken)
         => SetCoreAsync($"gate-instance:{instanceId}:{executorId}", gate, cancellationToken);
+
+    private static string PolicyKey(string? tenantId, string workflowName, string workflowVersion, string executorId)
+        => $"gate:{(string.IsNullOrEmpty(tenantId) ? HostScope : tenantId)}:{workflowName}:{workflowVersion}:{executorId}";
 
     private async ValueTask SetCoreAsync(string key, ApprovalGate gate, CancellationToken cancellationToken)
     {

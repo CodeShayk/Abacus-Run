@@ -262,7 +262,8 @@ public sealed class WorkflowRunner
             Attempt = invocation.Attempt,
             Pipeline = pipeline,
             Gates = new GateEvaluator(
-                instance.WorkflowName, instance.WorkflowVersion, gates, _deps.GatePolicies, _deps.Approvals),
+                instance.WorkflowName, instance.WorkflowVersion, instance.TenantId, gates,
+                _deps.GatePolicies, _deps.Approvals),
             Approvals = _deps.ApprovalService,
             Services = _deps.Services,
             ExecutorInvoked = async (executorId, superstep) =>

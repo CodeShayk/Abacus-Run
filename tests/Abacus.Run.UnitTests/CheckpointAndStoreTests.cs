@@ -483,11 +483,42 @@ public class SupportingStoreTests
         var store = new InMemoryGatePolicyStore();
         var gate = new ApprovalGate { Mode = ExecutionMode.RequireApproval, Reason = "policy" };
 
-        await store.SetAsync("wf", "1.0.0", "pay", gate, default);
+        await store.SetAsync(null, "wf", "1.0.0", "pay", gate, default);
 
-        (await store.FindAsync("wf", "1.0.0", "pay", null, default))!.Reason.Should().Be("policy");
-        (await store.FindAsync("wf", "2.0.0", "pay", null, default)).Should().BeNull("policies are version-scoped");
-        (await store.FindAsync("wf", "1.0.0", "other", null, default)).Should().BeNull();
+        (await store.FindAsync(null, "wf", "1.0.0", "pay", null, default))!.Reason.Should().Be("policy");
+        (await store.FindAsync(null, "wf", "2.0.0", "pay", null, default)).Should().BeNull("policies are version-scoped");
+        (await store.FindAsync(null, "wf", "1.0.0", "other", null, default)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Gate_policy_store_scopes_by_tenant_and_lists_one_scope_at_a_time()
+    {
+        var store = new InMemoryGatePolicyStore();
+        var gated = new ApprovalGate { Mode = ExecutionMode.RequireApproval, Reason = "tenant" };
+
+        await store.SetAsync(null, "wf", "1.0.0", "pay", new ApprovalGate { Reason = "host" }, default);
+        await store.SetAsync("t1", "wf", "1.0.0", "pay", gated, default);
+
+        (await store.FindAsync("t1", "wf", "1.0.0", "pay", null, default))!.Reason.Should().Be("tenant");
+        (await store.FindAsync("t2", "wf", "1.0.0", "pay", null, default))!.Reason
+            .Should().Be("host", "a tenant with no policy of its own falls back to the host scope");
+
+        (await store.ListAsync("t1", "wf", "1.0.0", default)).Should().ContainKey("pay");
+        (await store.ListAsync("t2", "wf", "1.0.0", default)).Should().BeEmpty();
+        (await store.ListAsync(null, "wf", "1.0.0", default)).Should().ContainKey("pay");
+    }
+
+    [Fact]
+    public async Task Gate_policy_removal_falls_back_to_the_next_scope()
+    {
+        var store = new InMemoryGatePolicyStore();
+        await store.SetAsync(null, "wf", "1.0.0", "pay", new ApprovalGate { Reason = "host" }, default);
+        await store.SetAsync("t1", "wf", "1.0.0", "pay", new ApprovalGate { Reason = "tenant" }, default);
+
+        (await store.RemoveAsync("t1", "wf", "1.0.0", "pay", default)).Should().BeTrue();
+        (await store.RemoveAsync("t1", "wf", "1.0.0", "pay", default)).Should().BeFalse("it is already gone");
+
+        (await store.FindAsync("t1", "wf", "1.0.0", "pay", null, default))!.Reason.Should().Be("host");
     }
 
     private static InstanceLogEntry Entry(string instanceId, string level, string executorId) => new()
