@@ -78,6 +78,13 @@ public sealed class HostExecutorRuntime
     public IApprovalCoordinator? Approvals { get; init; }
     public IServiceProvider? Services { get; init; }
 
+    /// <summary>
+    /// The audit hook for this instance, present when the workflow definition declares an audit
+    /// record. Executors call it to add their own constructs — plans, inputs, outputs — as the run
+    /// progresses. Null when the workflow keeps no audit record.
+    /// </summary>
+    public IWorkflowAuditRecorder? Audit { get; init; }
+
     /// <summary>Called when a host executor begins handling a message, before gate evaluation.</summary>
     public Func<string, int, ValueTask>? ExecutorInvoked { get; init; }
 

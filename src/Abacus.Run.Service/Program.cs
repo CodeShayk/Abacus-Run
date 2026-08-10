@@ -1,5 +1,6 @@
 using Abacus.Run.Api;
 using Abacus.Run.Service.ControlPlane;
+using Abacus.Run.Service.Infrastructure.Auditing;
 using Abacus.Run.Core;
 using Abacus.Run.Service;
 using Microsoft.AspNetCore.Builder;
@@ -10,6 +11,10 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddProblemDetails();
 builder.Services.AddAbacus(builder.Configuration);
+
+// Durable, workflow-agnostic storage for the audit records that workflow definitions declare.
+// Displaces the framework's in-memory default.
+builder.Services.AddSqliteAuditRecords(builder.Configuration);
 
 WebApplication app = builder.Build();
 

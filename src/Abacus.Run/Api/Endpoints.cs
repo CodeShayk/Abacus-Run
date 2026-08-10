@@ -227,6 +227,45 @@ public static class Endpoints
             return instance is null ? Results.NotFound() : Results.Ok(instance.ToDto());
         });
 
+        // The instance's state as its own workflow defines it: lifecycle status plus, for a workflow
+        // that declares an audit record, the record built so far — grouped by the sections the
+        // definition declared, so the presentation follows the declaration rather than this file
+        // knowing anything about a particular workflow.
+        app.MapGet("/workflows/{name}/instances/{id}/state", async (
+            string name,
+            string id,
+            [FromQuery] string? section,
+            IInstanceStore instances,
+            IWorkflowRegistry registry,
+            IAuditRecordStore auditRecords,
+            CancellationToken cancellationToken) =>
+        {
+            WorkflowInstance? instance = await instances.GetAsync(id, cancellationToken).ConfigureAwait(false);
+
+            // A mismatched workflow name is a wrong URL, not a different resource — reading an
+            // instance through another workflow's route would make the route meaningless.
+            if (instance is null || !string.Equals(instance.WorkflowName, name, StringComparison.OrdinalIgnoreCase))
+            {
+                return Results.NotFound();
+            }
+
+            AuditRecordDefinition? definition =
+                registry.Resolve(instance.WorkflowName, instance.WorkflowVersion)?.Definition
+                    is IAuditedWorkflowDefinition audited ? audited.AuditRecord : null;
+
+            AuditRecordDocument? document = definition is null
+                ? null
+                : await auditRecords.GetAsync(id, cancellationToken).ConfigureAwait(false);
+
+            return Results.Ok(new
+            {
+                instance = instance.ToDto(),
+                audit = BuildAuditState(definition, document, section)
+            });
+        })
+        .WithName("GetWorkflowInstanceState")
+        .WithSummary("Lifecycle status and the workflow's own audit record for one instance.");
+
         app.MapGet("/instances", async (
             [FromQuery] string? status,
             [FromQuery] string? workflow,
@@ -462,6 +501,70 @@ public static class Endpoints
                     title: "Approval already decided", detail: result.Detail, statusCode: StatusCodes.Status409Conflict)
             };
         });
+    }
+
+    /// <summary>
+    /// Shapes an audit record for the wire. The declared sections drive the shape — every declared
+    /// section appears, empty ones included, so a caller can see what the workflow has yet to record
+    /// as readily as what it has. Undeclared entries are ignored the same way the recorder refuses
+    /// them. Returns null when the workflow keeps no record at all.
+    /// </summary>
+    private static object? BuildAuditState(
+        AuditRecordDefinition? definition, AuditRecordDocument? document, string? sectionFilter)
+    {
+        if (definition is null) return null;
+
+        string[]? wanted = sectionFilter?
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        IEnumerable<AuditSectionDefinition> sections = definition.Sections;
+        if (wanted is { Length: > 0 })
+        {
+            sections = sections.Where(s => wanted.Contains(s.Kind, StringComparer.OrdinalIgnoreCase));
+        }
+
+        var shaped = sections.Select(s => new
+        {
+            s.Kind,
+            s.Description,
+            s.Multiple,
+            entries = (document?.Entries ?? [])
+                .Where(e => string.Equals(e.SectionKind, s.Kind, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(e => e.Sequence)
+                .Select(e => new { e.Key, e.Sequence, e.RecordedUtc, payload = ParseJson(e.PayloadJson) })
+        });
+
+        return new
+        {
+            rootKind = definition.RootKind,
+            definition.Description,
+            // Null until the workflow opens the record — the shape is known from the definition
+            // before any run has recorded anything against it.
+            rootKey = document?.Root.RootKey,
+            status = document?.Root.Status,
+            openedUtc = document?.Root.OpenedUtc,
+            closedUtc = document?.Root.ClosedUtc,
+            attributes = document is null ? null : ParseJson(document.Root.AttributesJson),
+            sections = shaped
+        };
+    }
+
+    /// <summary>
+    /// Payloads are stored as JSON text. Re-emitting them as elements keeps the response readable
+    /// rather than nesting escaped strings inside it.
+    /// </summary>
+    private static JsonElement? ParseJson(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+
+        try
+        {
+            return JsonDocument.Parse(json).RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     internal static bool TryParseOutcome(string? value, out ApprovalOutcomeKind outcome)

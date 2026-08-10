@@ -25,6 +25,12 @@ public sealed class WorkflowRunnerDependencies
     public IApprovalService? ApprovalService { get; init; }
     public IGatePolicyStore? GatePolicies { get; init; }
     public IAuditStore? Audit { get; init; }
+
+    /// <summary>
+    /// Backing store for workflow audit records. Only consulted for definitions that implement
+    /// <see cref="IAuditedWorkflowDefinition"/>.
+    /// </summary>
+    public IAuditRecordStore? AuditRecords { get; init; }
     public ILogStore? Logs { get; init; }
     public IServiceProvider? Services { get; init; }
     public WorkflowHostOptions Options { get; init; } = new();
@@ -104,10 +110,15 @@ public sealed class WorkflowRunner
     {
         var gates = new Dictionary<string, ApprovalGate>(StringComparer.Ordinal);
 
+        // A definition that declares an audit record gets a recorder bound to its declared shape;
+        // one that doesn't gets null, and the hook costs it nothing.
+        IWorkflowAuditRecorder? auditRecorder = CreateAuditRecorder(instance, descriptor);
+
         var buildContext = new WorkflowBuildContext(
             instance.InstanceId, instance.TenantId, instance.WorkflowName, instance.WorkflowVersion,
             invocation.Attempt, _deps.Services,
-            (executor, gate) => Attach(executor, gate, instance, invocation, gates));
+            (executor, gate) => Attach(executor, gate, instance, invocation, gates, auditRecorder),
+            auditRecorder);
 
         Workflow workflow = await descriptor.Definition.BuildAsync(buildContext, cancellationToken).ConfigureAwait(false);
 
@@ -233,12 +244,39 @@ public sealed class WorkflowRunner
         return RunOutcome.Completed(output);
     }
 
+    /// <summary>
+    /// Builds the per-instance audit recorder when the definition declares a record shape. Returns
+    /// null otherwise — auditing is opt-in per workflow, not a tax on every one.
+    /// </summary>
+    private IWorkflowAuditRecorder? CreateAuditRecorder(WorkflowInstance instance, WorkflowDescriptor descriptor)
+    {
+        if (descriptor.Definition is not IAuditedWorkflowDefinition audited) return null;
+
+        if (_deps.AuditRecords is not { } store)
+        {
+            _deps.Logger.LogWarning(
+                "Workflow '{Workflow}' declares an audit record but no IAuditRecordStore is registered; auditing is off.",
+                instance.WorkflowName);
+            return null;
+        }
+
+        return new WorkflowAuditRecorder(
+            audited.AuditRecord,
+            store,
+            instance.InstanceId,
+            instance.WorkflowName,
+            instance.WorkflowVersion,
+            _deps.Clock,
+            _deps.Logger);
+    }
+
     private ExecutorBinding Attach(
         IHostExecutor executor,
         ApprovalGate gate,
         WorkflowInstance instance,
         WorkflowInvocationContext invocation,
-        Dictionary<string, ApprovalGate> gates)
+        Dictionary<string, ApprovalGate> gates,
+        IWorkflowAuditRecorder? audit)
     {
         gates[executor.Id] = gate;
 
@@ -266,6 +304,7 @@ public sealed class WorkflowRunner
                 _deps.GatePolicies, _deps.Approvals),
             Approvals = _deps.ApprovalService,
             Services = _deps.Services,
+            Audit = audit,
             ExecutorInvoked = async (executorId, superstep) =>
             {
                 _hostInvocationEvents.Enqueue(executorId);

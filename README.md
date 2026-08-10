@@ -285,12 +285,75 @@ Policies are keyed by workflow **version**, since executor ids and gates change 
 
 `GET /instances/{id}/events` is an SSE stream. Instance queries support status, workflow, correlation ID, limit, and offset filters.
 
+### Instance state and audit records
+
+- `GET /workflows/{name}/instances/{id}/state`
+
+Returns the instance's lifecycle status alongside the audit record its own workflow declared. The
+route is scoped by workflow name because the response shape comes from that workflow's declaration; a
+mismatched name returns `404`. `?section=plan,output` narrows the response to named sections. See
+[Audit records](#audit-records).
+
 ### Approvals
 
 - `GET /approvals`
 - `GET /approvals/{approvalId}`
 - `GET /instances/{id}/approvals`
 - `POST /approvals/{approvalId}/decision`
+
+## Audit records
+
+Events record what the runtime did. An audit record answers the separate question of why a run's
+result is defensible — the plan a node formed, the input it worked from, the output it produced. That
+is workflow-specific, so the framework supplies the hook and the storage, never the schema.
+
+A definition opts in by implementing `IAuditedWorkflowDefinition` and declaring a root kind plus the
+sections that may hang off it:
+
+```csharp
+public sealed class OrderWorkflow
+    : IWorkflowDefinition<OrderContext, OrderResult>, IAuditedWorkflowDefinition
+{
+    public AuditRecordDefinition AuditRecord { get; } = new(
+        "order",
+        "One order, as processed.",
+        [
+            new AuditSectionDefinition("submission", "What was submitted.", Multiple: false),
+            new AuditSectionDefinition("step", "One processing step."),
+            new AuditSectionDefinition("outcome", "How the run settled.", Multiple: false)
+        ]);
+}
+```
+
+The runtime then hands every node a recorder bound to that declaration. Executors reach it through
+`Runtime.Audit`; a definition wiring its own nodes reads `WorkflowBuildContext.Audit`. Both are
+nullable, so a workflow that declares no record costs nothing:
+
+```csharp
+if (Runtime.Audit is { } audit)
+{
+    await audit.OpenAsync(input.OrderId, attributes: null, cancellationToken);
+    await audit.RecordAsync("step", Id, new { accepted = true }, cancellationToken);
+    await audit.CloseAsync(AuditRecordStatus.Completed, cancellationToken);
+}
+```
+
+Storage stays workflow-agnostic: `IAuditRecordStore` keeps a root row plus entries whose section kind
+is a string and whose payload is opaque JSON, so a new workflow needs no schema change. Recording is
+best-effort by contract — a store failure is logged and swallowed, because failing work merely
+because its explanation could not be filed trades a correct result for a missing one. Undeclared
+section kinds are dropped, and re-recording the same `(section, key)` replaces the entry so a retried
+executor corrects its record rather than contradicting it.
+
+Read the record back through `GET /workflows/{name}/instances/{id}/state`. Every declared section
+appears whether or not anything has been recorded into it, so a run in progress shows what is still
+outstanding as readily as what is done.
+
+The framework default is `InMemoryAuditRecordStore`. `Abacus.Run.Service` displaces it with an EF
+Core SQLite store via `AddSqliteAuditRecords(configuration)`, configured under
+`Abacus:AuditRecords:ConnectionString`.
+
+Full walkthrough: [Workflow audit records](docs/wiki.md#workflow-audit-records).
 
 ## Configuration
 
@@ -319,9 +382,13 @@ Options are read from the `WorkflowHost` configuration section. For example:
 }
 ```
 
-The default host uses in-memory instance, event, log, approval, checkpoint, blob, and audit stores. Treat this configuration as development-oriented until durable store implementations are supplied.
+The default host uses in-memory instance, event, log, approval, checkpoint, blob, audit, and audit-record stores. Treat this configuration as development-oriented until durable store implementations are supplied.
 
 Set `Abacus:SqlServer:ConnectionString` to enable the EF Core SQL Server stores and `Abacus:Redis:ConnectionString` to enable Redis Streams and control messages. `AddAbacus` keeps the in-memory stores when these settings are absent.
+
+`Abacus:AuditRecords:ConnectionString` points the SQLite audit-record store at its database file and
+defaults to `Data Source=./data/abacus-audit.db`. The directory is created and the migrations applied
+at startup.
 
 ## Project Layout
 
@@ -340,11 +407,11 @@ Folders inside each project:
 src/Abacus.Run/               src/Abacus.Run.Service/
   Abstractions/                 ControlPlane/      Razor Pages backing services
   Api/                          Infrastructure/    SQL Server stores, Redis bus
-  Core/                         Pages/             control-plane Razor Pages
-  Dispatch/                     wwwroot/           control-plane CSS and JS
-  EventBus/                     Program.cs
-  Executors/                    AbacusServiceCollectionExtensions.cs
-  Middlewares/
+  Core/                           Auditing/        audit-record store and migrations
+  Dispatch/                     Pages/             control-plane Razor Pages
+  EventBus/                     wwwroot/           control-plane CSS and JS
+  Executors/                    Program.cs
+  Middlewares/                  AbacusServiceCollectionExtensions.cs
   Persistence/
 ```
 

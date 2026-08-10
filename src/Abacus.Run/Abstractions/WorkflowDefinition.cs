@@ -58,7 +58,8 @@ public sealed class WorkflowBuildContext
         string workflowVersion,
         int attempt,
         IServiceProvider? services,
-        Func<IHostExecutor, ApprovalGate, ExecutorBinding> attach)
+        Func<IHostExecutor, ApprovalGate, ExecutorBinding> attach,
+        IWorkflowAuditRecorder? audit = null)
     {
         InstanceId = instanceId;
         TenantId = tenantId;
@@ -66,6 +67,7 @@ public sealed class WorkflowBuildContext
         WorkflowVersion = workflowVersion;
         Attempt = attempt;
         Services = services;
+        Audit = audit;
         _attach = attach ?? throw new ArgumentNullException(nameof(attach));
     }
 
@@ -75,6 +77,14 @@ public sealed class WorkflowBuildContext
     public string WorkflowVersion { get; }
     public int Attempt { get; }
     public IServiceProvider? Services { get; }
+
+    /// <summary>
+    /// The audit hook for this instance, present when the definition implements
+    /// <see cref="IAuditedWorkflowDefinition"/>. Available here so a definition can hand it to the
+    /// executors it constructs; executors attached with <see cref="Node"/> also reach it through
+    /// <see cref="HostExecutorRuntime.Audit"/>.
+    /// </summary>
+    public IWorkflowAuditRecorder? Audit { get; }
 
     /// <summary>Gates declared during this build, by executor id. Read by the runtime.</summary>
     public IReadOnlyDictionary<string, ApprovalGate> Gates => _gates;

@@ -12,6 +12,7 @@ This page is the repository-level technical wiki. It documents the implementatio
 - [Project structure](#project-structure)
 - [Getting started](#getting-started)
 - [Authoring a workflow](#authoring-a-workflow)
+- [Workflow audit records](#workflow-audit-records)
 - [Registering workflows and middleware](#registering-workflows-and-middleware)
 - [Instance lifecycle](#instance-lifecycle)
 - [Retries and failure classification](#retries-and-failure-classification)
@@ -43,6 +44,7 @@ This page is the repository-level technical wiki. It documents the implementatio
 | Events | Sequenced per-instance event store plus optional event bus and SSE relay |
 | Approvals | Durable approval contracts and in-memory coordinator/store, with decision and expiry handling |
 | Middleware | Workflow-level and host-executor-level pipelines |
+| Audit records | A workflow declares the shape of its own audit record; the runtime hands every node a recorder and stores entries generically |
 | Library | `src/Abacus.Run` — headless framework: runtime, dispatch, executors, middleware, in-memory stores, HTTP API |
 | Service host | `src/Abacus.Run.Service` — control-plane UI, SQL Server stores, Redis event bus, startup wiring |
 | Container | Multi-stage .NET 9 image listening on port 8080 |
@@ -58,6 +60,7 @@ The repository contains a working runtime, API host, control plane, built-in exe
 - `InMemoryApprovalStore`
 - `InMemoryGatePolicyStore`
 - `InMemoryAuditStore`
+- `InMemoryAuditRecordStore`
 - `InMemoryBlobStore`
 - `OverflowCheckpointStore` over the blob abstraction
 - `InMemoryEventBus`
@@ -151,11 +154,11 @@ Folders inside each project:
 src/Abacus.Run/               src/Abacus.Run.Service/
   Abstractions/                 ControlPlane/      Razor Pages backing services
   Api/                          Infrastructure/    SQL Server stores, Redis bus
-  Core/                         Pages/             control-plane Razor Pages
-  Dispatch/                     wwwroot/           control-plane CSS and JS
-  EventBus/                     Program.cs
-  Executors/                    AbacusServiceCollectionExtensions.cs
-  Middlewares/
+  Core/                           Auditing/        audit-record store and migrations
+  Dispatch/                     Pages/             control-plane Razor Pages
+  EventBus/                     wwwroot/           control-plane CSS and JS
+  Executors/                    Program.cs
+  Middlewares/                  AbacusServiceCollectionExtensions.cs
   Persistence/
 ```
 
@@ -296,6 +299,86 @@ The output type must be a reference type because a gated executor returns `null`
 ### Raw framework nodes
 
 `WorkflowBuildContext.RawNode(...)` is an escape hatch for raw framework executor bindings and agent bindings. Raw nodes participate in the graph but do not receive host executor middleware and cannot be approval-gated. Use `Node(...)` with a `HostExecutor<TIn, TOut>` when middleware or approvals are required.
+
+## Workflow audit records
+
+Events answer "what did the runtime do". An audit record answers "why is this result defensible" —
+the plan a node formed, the input it worked from, the output it produced, and what it published.
+Those are workflow-specific questions, so the framework supplies the hook and the storage but not the
+schema.
+
+The mechanism has three stages, and the separation between them is the point.
+
+**1. The definition declares the shape.** A definition that keeps a record implements
+`IAuditedWorkflowDefinition` and returns an `AuditRecordDefinition`: a root aggregate kind plus the
+child sections that may hang off it.
+
+```csharp
+public sealed class ExampleWorkflowDefinition
+    : IWorkflowDefinition<ExampleContext, ExampleResult>, IAuditedWorkflowDefinition
+{
+    public AuditRecordDefinition AuditRecord => ExampleAuditRecord.Definition;
+}
+
+public static class ExampleAuditRecord
+{
+    public const string RootKind = "example-workflow";
+
+    // Section kinds are written into storage, so they are part of the workflow's contract —
+    // name them as constants rather than repeating string literals at each call site.
+    public const string Submission = "submission";
+    public const string Plan = "plan";
+    public const string Output = "output";
+
+    public static readonly AuditRecordDefinition Definition = new(
+        RootKind,
+        "A workflow-specific audit record for the important steps in a run.",
+        [
+            new AuditSectionDefinition(Submission, "The input values and context used at start.", Multiple: false),
+            new AuditSectionDefinition(Plan, "The plan the workflow formed before acting."),
+            new AuditSectionDefinition(Output, "The resulting decision or artifact.")
+        ]);
+}
+```
+
+**2. The runtime hands every node a recorder.** `WorkflowRunner` reads the interface at build time
+and, when an `IAuditRecordStore` is registered, constructs a `WorkflowAuditRecorder` bound to the
+definition and the instance. Executors reach it through `HostExecutorRuntime.Audit`; a definition
+wiring its own nodes reads `WorkflowBuildContext.Audit`. Both are nullable — a workflow that declares
+no record gets none, and no executor needs to know which is the case.
+
+```csharp
+if (Runtime.Audit is { } audit)
+{
+    await audit.OpenAsync(input.RunId, attributes: null, cancellationToken);
+    await audit.RecordAsync(ExampleAuditRecord.Output, item.Id, result, cancellationToken);
+    await audit.CloseAsync(AuditRecordStatus.Completed, cancellationToken);
+}
+```
+
+**3. Storage stays generic.** `IAuditRecordStore` holds a root row and a stream of entries whose
+section kind is a string and whose payload is opaque JSON. A new workflow with a completely different
+record needs no schema change. The framework default is `InMemoryAuditRecordStore`;
+`Abacus.Run.Service` displaces it with a SQLite-backed store under `Abacus:AuditRecords`.
+
+Guarantees the recorder makes:
+
+| Rule | Reason |
+| --- | --- |
+| An undeclared section kind is logged and dropped | The declared shape is the contract, not a suggestion |
+| Re-recording the same `(section, key)` replaces the entry | A retried executor corrects its record rather than contradicting it |
+| Entries carry a monotonic sequence | Order of work survives storage that does not preserve insertion order |
+| A store failure is swallowed and logged, never rethrown | An audit write explains work that already happened; failing the work because its explanation could not be filed trades a correct result for a missing one |
+| `CloseAsync` before any `OpenAsync` writes nothing | A root with no identity is worse than no root |
+
+Because a failed write is invisible to the workflow, order matters at the edges: record a publication
+failure *before* letting it propagate, so the record explains the failure it caused.
+
+The record is readable through the framework's own route — see
+[Instances and diagnostics](#instances-and-diagnostics) — which projects the stored entries back
+through the declared sections. Every declared section appears whether or not anything has been
+recorded into it yet, so a caller reading a run in progress sees what is still outstanding as readily
+as what is done.
 
 ## Registering workflows and middleware
 
@@ -619,6 +702,41 @@ Unknown workflow, version, or executor returns `404`. A raw node or an unsupport
 | `GET` | `/instances/{id}/checkpoints` | Inspect checkpoint metadata |
 | `GET` | `/instances/{id}/events/history` | Read persisted event history |
 | `GET` | `/instances/{id}/events` | Subscribe to live SSE events |
+| `GET` | `/workflows/{name}/instances/{id}/state` | Lifecycle status plus the workflow's own audit record |
+
+`/workflows/{name}/instances/{id}/state` is the one instance route scoped by workflow name, because
+what it returns is shaped by that workflow's declaration. A mismatched name is a wrong URL rather
+than a different resource, so it returns `404` rather than the instance. `audit` is `null` when the
+workflow declares no record. `?section=` narrows the response to named sections:
+
+```bash
+curl 'http://localhost:5000/workflows/example-workflow/instances/{id}/state?section=plan,output'
+```
+
+```json
+{
+  "instance": { "instanceId": "…", "status": "Completed", "workflowVersion": "1.0.0" },
+  "audit": {
+    "rootKind": "example-workflow",
+    "rootKey": "RUN-4471",
+    "status": "Completed",
+    "attributes": { "requestId": "…" },
+    "sections": [
+      {
+        "kind": "output",
+        "description": "The resulting decision or artifact.",
+        "multiple": true,
+        "entries": [
+          { "key": "OUT-001", "sequence": 12, "recordedUtc": "…", "payload": { "decision": "Approved" } }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Payloads are re-emitted as JSON rather than as escaped strings, and sections the workflow has not yet
+recorded into come back with an empty `entries` array rather than being omitted.
 
 ### Instance controls
 
@@ -710,6 +828,28 @@ Configuration is bound from the `WorkflowHost` section. Defaults are defined in 
   }
 }
 ```
+
+### Host-supplied sections
+
+`WorkflowHost` is the framework's own section. `Abacus.Run.Service` reads further sections that
+select the concrete infrastructure it substitutes for the in-memory defaults:
+
+```json
+{
+  "Abacus": {
+    "AuditRecords": { "ConnectionString": "Data Source=./data/abacus-audit.db" },
+    "SqlServer": { "ConnectionString": "", "EnsureDatabaseCreated": false },
+    "Redis": { "ConnectionString": "", "MaxStreamLength": 10000 }
+  }
+}
+```
+
+`Abacus:AuditRecords:ConnectionString` backs the generic audit-record store with SQLite and defaults
+to `Data Source=./data/abacus-audit.db`; the directory is created at startup and the migrations are
+applied by a hosted service. The connection string is resolved from `IOptions` inside the context
+factory rather than read at registration time, so a test host's configuration override actually
+applies — reading it at wire time silently binds every host to the deployed database file. Remove the
+`AddSqliteAuditRecords` call to keep the framework's in-memory default.
 
 ### Important production settings
 
@@ -874,8 +1014,8 @@ The solution includes several test layers:
 
 | Suite | Purpose |
 | --- | --- |
-| Unit tests | Contracts, policies, runner behavior, middleware, executors, stores, and control logic |
-| Integration tests | Real ASP.NET Core host, HTTP routes, event streams, approvals, and instance controls |
+| Unit tests | Contracts, policies, runner behavior, middleware, executors, stores, audit recorder, and control logic |
+| Integration tests | Real ASP.NET Core host, HTTP routes, event streams, approvals, instance controls, and the instance state route |
 | Chaos tests | Failure and lifecycle scenarios |
 | Load tests | Throughput-oriented test project |
 
@@ -907,7 +1047,7 @@ dotnet test --configuration Release --no-build
 
 ### Custom persistence
 
-Implement the store interfaces used by `AddWorkflowHost`, including instance, event, log, approval, gate policy, audit, blob, and checkpoint contracts. Preserve these invariants:
+Implement the store interfaces used by `AddWorkflowHost`, including instance, event, log, approval, gate policy, audit, audit record, blob, and checkpoint contracts. Preserve these invariants:
 
 - Instance updates use optimistic concurrency.
 - Terminal state is not overwritten by a losing writer.
@@ -915,6 +1055,15 @@ Implement the store interfaces used by `AddWorkflowHost`, including instance, ev
 - Event sequence values are unique and ordered per instance.
 - Checkpoint indexes are returned in the order expected by `CheckpointManager`.
 - Approval decisions are single-winner and quorum-aware.
+- Audit record entries are unique per `(instance, section kind, key)`, so a re-record replaces.
+
+### Custom audit record storage
+
+Implement `IAuditRecordStore` when records must outlive the process or be queried outside the host.
+Keep the payload opaque — the value of the contract is that a new workflow with a different record
+shape needs no schema change. `Abacus.Run.Service/Infrastructure/Auditing` is a worked example: an EF
+Core SQLite store with a unique index on `(InstanceId, SectionKind, Key)`, registered through
+`AddSqliteAuditRecords()`, which removes the framework's in-memory registration rather than racing it.
 
 ### Custom executors
 
@@ -994,6 +1143,13 @@ A tenant or host-wide policy is gating it. Call `GET /workflows/{name}/versions/
 ### A tenant's configuration appears to be ignored
 
 Confirm the tenant used to configure the workflow is the tenant the instance runs under; the runner resolves gates for `instance.TenantId`, not for the caller who last edited the policy. Also check the instance's workflow version against the version the policy was written for, and whether a per-instance override outranks it.
+### `audit` is null on the instance state route
+
+The workflow does not implement `IAuditedWorkflowDefinition`, so it declares no record. If it does
+implement it and the record is still empty, check that an `IAuditRecordStore` is registered — the
+runner logs a warning and returns no recorder when a definition declares a record with no store
+behind it — and remember that recorder failures are swallowed by design, so the host log is where a
+storage problem surfaces, not the response.
 
 ### An outbound call is blocked
 

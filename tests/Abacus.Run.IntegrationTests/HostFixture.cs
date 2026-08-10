@@ -249,6 +249,76 @@ public sealed class TenantOrderWorkflow : IWorkflowDefinition<OrderContext, Orde
     }
 }
 
+/// <summary>
+/// Declares an audit record, so the generic state endpoint has a workflow to read back. Deliberately
+/// unremarkable otherwise — the point is that a definition gets auditing by declaring it, with no
+/// framework code that knows what an "order" is.
+/// </summary>
+public sealed class AuditedOrderWorkflow : IWorkflowDefinition<OrderContext, OrderResult>, IAuditedWorkflowDefinition
+{
+    public const string Submission = "submission";
+    public const string Step = "step";
+    public const string Outcome = "outcome";
+
+    public string Name => "audited-order";
+    public string Version => "1.0.0";
+
+    public AuditRecordDefinition AuditRecord { get; } = new(
+        "order",
+        "One order, as processed.",
+        [
+            new AuditSectionDefinition(Submission, "What was submitted.", Multiple: false),
+            new AuditSectionDefinition(Step, "One processing step."),
+            new AuditSectionDefinition(Outcome, "How the run settled.", Multiple: false)
+        ]);
+
+    public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken cancellationToken)
+    {
+        ExecutorBinding validate = context.Node(new Validate("validate"));
+        ExecutorBinding submit = context.Node(new Submit("submit"));
+
+        return new ValueTask<Workflow>(new WorkflowBuilder(validate)
+            .AddEdge(validate, submit)
+            .WithOutputFrom(submit)
+            .WithName(Name)
+            .Build());
+    }
+
+    private sealed class Validate(string id) : HostExecutor<OrderContext, OrderContext>(id)
+    {
+        protected override async ValueTask<OrderContext> ExecuteCoreAsync(
+            OrderContext input, IWorkflowContext context, CancellationToken cancellationToken)
+        {
+            if (Runtime.Audit is { } audit)
+            {
+                await audit.OpenAsync(input.OrderId, new Dictionary<string, object?> { ["amount"] = input.Amount }, cancellationToken);
+                await audit.RecordAsync(Submission, null, new { input.OrderId, input.Amount }, cancellationToken);
+                await audit.RecordAsync(Step, Id, new { accepted = true }, cancellationToken);
+            }
+
+            return input;
+        }
+    }
+
+    private sealed class Submit(string id) : HostExecutor<OrderContext, OrderResult>(id)
+    {
+        protected override async ValueTask<OrderResult> ExecuteCoreAsync(
+            OrderContext input, IWorkflowContext context, CancellationToken cancellationToken)
+        {
+            var result = new OrderResult(input.OrderId, "submitted");
+
+            if (Runtime.Audit is { } audit)
+            {
+                await audit.RecordAsync(Step, Id, new { result.Status }, cancellationToken);
+                await audit.RecordAsync(Outcome, null, result, cancellationToken);
+                await audit.CloseAsync(AuditRecordStatus.Completed, cancellationToken);
+            }
+
+            return result;
+        }
+    }
+}
+
 public sealed class HostFixture : WebApplicationFactory<Program>
 {
     public SideEffectLedger Ledger { get; } = new();
@@ -261,6 +331,7 @@ public sealed class HostFixture : WebApplicationFactory<Program>
             services.AddSingleton<IWorkflowDefinition>(sp => new OrderWorkflow(sp.GetRequiredService<SideEffectLedger>()));
             services.AddSingleton<IWorkflowDefinition>(sp => new GatedOrderWorkflow(sp.GetRequiredService<SideEffectLedger>()));
             services.AddSingleton<IWorkflowDefinition>(sp => new TenantOrderWorkflow(sp.GetRequiredService<SideEffectLedger>()));
+            services.AddSingleton<IWorkflowDefinition>(new AuditedOrderWorkflow());
         });
 
         return base.CreateHost(builder);
