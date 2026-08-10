@@ -142,7 +142,7 @@ The default in-memory stores are suitable for development and tests. They do not
 | Project | Responsibility |
 | --- | --- |
 | `src/Abacus.Run` | Headless framework: workflow contracts, runtime, dispatch, executors, middleware, in-memory store defaults, and the HTTP API endpoints |
-| `src/Abacus.Run.Service` | Deployable host: control-plane UI, SQL Server persistence, Redis event bus, and service registration |
+| `src/Abacus.Run.Service` | Deployable host: control-plane UI, concrete persistence and event-bus integrations, service registration, and the workflow definitions this deployment runs |
 | `tests/Abacus.Run.UnitTests` | Focused runtime and store tests; references the library only |
 | `tests/Abacus.Run.IntegrationTests` | Real host, HTTP endpoint, control-plane, and architecture-boundary tests |
 | `tests/Abacus.Run.ChaosTests` | Failure and lifecycle resilience tests |
@@ -156,10 +156,11 @@ src/Abacus.Run/               src/Abacus.Run.Service/
   Api/                          Infrastructure/    SQL Server stores, Redis bus
   Core/                           Auditing/        audit-record store and migrations
   Dispatch/                     Pages/             control-plane Razor Pages
-  EventBus/                     wwwroot/           control-plane CSS and JS
-  Executors/                    Program.cs
-  Middlewares/                  AbacusServiceCollectionExtensions.cs
-  Persistence/
+  EventBus/                     Workflows/         workflow definitions hosted here
+  Executors/                      <Name>/          one self-contained folder per workflow
+  Middlewares/                  wwwroot/           control-plane CSS and JS
+  Persistence/                  Program.cs
+                                AbacusServiceCollectionExtensions.cs
 ```
 
 ### Where the line falls
@@ -177,8 +178,10 @@ dependencies.
 
 `ArchitectureBoundaryTests` in the integration suite enforces the split: the library must not
 reference the host, EF Core, Redis, or Razor Pages; every framework contract the host implements must
-be a named `SqlServer*` or `Redis*` adapter; and the host must define no workflow definitions,
-executors, or middleware of its own.
+be a named `SqlServer*` or `Redis*` adapter; and the host must define no framework extension points —
+workflow definitions, host executors, middleware — outside a declared
+`Abacus.Run.Service.Workflows.<Name>` namespace. That carve-out is what lets a workflow ship inside
+the host assembly without the rule reading as "the shell may grow behaviour of its own".
 
 Workflow authors should normally depend on `Abacus.Run` and its `Abacus.Run.Abstractions` namespace,
 then register their definitions in the application host.
@@ -379,6 +382,53 @@ The record is readable through the framework's own route — see
 through the declared sections. Every declared section appears whether or not anything has been
 recorded into it yet, so a caller reading a run in progress sees what is still outstanding as readily
 as what is done.
+
+### The worked example
+
+`src/Abacus.Run.Service/Workflows/ExampleOrder` is a runnable version of everything above, registered
+by the host as workflow `example-order`. The work it does is deliberately dull — plan, price each
+line, total — because the point is the auditing around it.
+
+| File | What it shows |
+| --- | --- |
+| `ExampleOrderAuditRecord.cs` | The declaration in one place, section kinds as constants because they are part of the workflow's contract |
+| `ExampleOrderWorkflow.cs` | `OpenAsync` with attributes, a single-entry plan, per-line entries keyed by SKU, and both terminal paths |
+
+Two details in it are worth copying rather than the shape of the record itself.
+
+Per-line entries are keyed by SKU. Because re-recording the same `(section, key)` replaces, a retried
+attempt corrects the record instead of appending a second, contradictory line. Keying by something
+stable about the work — rather than leaving the key null or generating one per attempt — is what buys
+that.
+
+The failure path records the outcome *before* throwing:
+
+```csharp
+var failure = new WorkflowDeadStopException($"Line '{line.Sku}' cannot be priced.");
+
+if (audit is not null)
+{
+    await audit.RecordAsync(ExampleOrderAuditRecord.Outcome, null,
+        new { status = "Failed", failedSku = line.Sku, reason = failure.Message, total }, cancellationToken);
+    await audit.CloseAsync(AuditRecordStatus.Failed, cancellationToken);
+}
+
+throw failure;
+```
+
+Start it, then read the record back:
+
+```bash
+curl -X POST http://localhost:5000/workflows/example-order/instances \
+  -H 'Content-Type: application/json' \
+  -d '{"context":{"orderId":"ORD-1","lines":[{"sku":"SKU-A","quantity":2,"unitPrice":10.50}]}}'
+
+curl http://localhost:5000/workflows/example-order/instances/{id}/state
+```
+
+Adding `"failOnSku": "SKU-A"` to the context exercises the failure path. `ExampleOrderWorkflowTests`
+in the integration suite covers both, along with the empty-section case and the fact that the host's
+SQLite store — not the framework default — is what holds the result.
 
 ## Registering workflows and middleware
 
@@ -1015,7 +1065,7 @@ The solution includes several test layers:
 | Suite | Purpose |
 | --- | --- |
 | Unit tests | Contracts, policies, runner behavior, middleware, executors, stores, audit recorder, and control logic |
-| Integration tests | Real ASP.NET Core host, HTTP routes, event streams, approvals, instance controls, and the instance state route |
+| Integration tests | Real ASP.NET Core host, HTTP routes, event streams, approvals, instance controls, the instance state route, and the example workflow end to end |
 | Chaos tests | Failure and lifecycle scenarios |
 | Load tests | Throughput-oriented test project |
 

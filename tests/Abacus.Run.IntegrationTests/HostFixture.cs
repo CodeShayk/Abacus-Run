@@ -337,9 +337,18 @@ public sealed class HostFixture : WebApplicationFactory<Program>
         return base.CreateHost(builder);
     }
 
+    /// <summary>
+    /// The host substitutes a SQLite audit-record store for the framework default, so without an
+    /// override every fixture would share the deployed database file and inherit records from
+    /// previous runs. One file per fixture, deleted on dispose, keeps that state out of the suite.
+    /// </summary>
+    private readonly string _auditDatabasePath =
+        Path.Combine(Path.GetTempPath(), $"abacus-audit-{Guid.NewGuid():N}.db");
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseSetting("WorkflowHost:Approvals:SweepIntervalSeconds", "1");
+        builder.UseSetting("Abacus:AuditRecords:ConnectionString", $"Data Source={_auditDatabasePath}");
         builder.ConfigureServices(services =>
         {
             services.AddHttpClient<Abacus.Run.Service.ControlPlane.Services.WorkflowApiClient>(client =>
@@ -396,5 +405,21 @@ public sealed class HostFixture : WebApplicationFactory<Program>
 
         JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
         return body.GetProperty("instanceId").GetString()!;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+
+        if (!disposing) return;
+
+        // Best-effort: a file left behind is untidy, not a test failure.
+        try
+        {
+            if (File.Exists(_auditDatabasePath)) File.Delete(_auditDatabasePath);
+        }
+        catch (IOException)
+        {
+        }
     }
 }

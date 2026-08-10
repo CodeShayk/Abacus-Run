@@ -353,6 +353,21 @@ The framework default is `InMemoryAuditRecordStore`. `Abacus.Run.Service` displa
 Core SQLite store via `AddSqliteAuditRecords(configuration)`, configured under
 `Abacus:AuditRecords:ConnectionString`.
 
+A runnable example ships in the host at
+[`src/Abacus.Run.Service/Workflows/ExampleOrder`](src/Abacus.Run.Service/Workflows/ExampleOrder) —
+workflow `example-order`. It declares four sections, keys its per-line entries so a retry corrects
+the record rather than doubling it, and records the failure before letting it propagate:
+
+```bash
+curl -X POST http://localhost:5000/workflows/example-order/instances \
+  -H 'Content-Type: application/json' \
+  -d '{"context":{"orderId":"ORD-1","lines":[{"sku":"SKU-A","quantity":2,"unitPrice":10.50}]}}'
+
+curl http://localhost:5000/workflows/example-order/instances/{id}/state
+```
+
+Send `"failOnSku": "SKU-A"` in the context to see the failure path and the record it leaves behind.
+
 Full walkthrough: [Workflow audit records](docs/wiki.md#workflow-audit-records).
 
 ## Configuration
@@ -395,7 +410,7 @@ at startup.
 | Project | Responsibility |
 | --- | --- |
 | `src/Abacus.Run` | Headless framework: workflow runtime, dispatch, executors, middleware, in-memory store defaults, and HTTP API endpoints |
-| `src/Abacus.Run.Service` | Deployable host: control-plane UI, SQL Server stores, Redis event bus, and startup wiring |
+| `src/Abacus.Run.Service` | Deployable host: control-plane UI, SQL Server stores, Redis event bus, the SQLite audit-record store, startup wiring, and the example workflow |
 | `tests/Abacus.Run.UnitTests` | Unit coverage for runtime behavior; references the library only |
 | `tests/Abacus.Run.IntegrationTests` | HTTP, control-plane, and architecture-boundary coverage against the real host |
 | `tests/Abacus.Run.ChaosTests` | Failure and lifecycle resilience coverage |
@@ -409,13 +424,14 @@ src/Abacus.Run/               src/Abacus.Run.Service/
   Api/                          Infrastructure/    SQL Server stores, Redis bus
   Core/                           Auditing/        audit-record store and migrations
   Dispatch/                     Pages/             control-plane Razor Pages
-  EventBus/                     wwwroot/           control-plane CSS and JS
-  Executors/                    Program.cs
-  Middlewares/                  AbacusServiceCollectionExtensions.cs
-  Persistence/
+  EventBus/                     Workflows/         workflow definitions hosted here
+  Executors/                      ExampleOrder/    the audit-capable example workflow
+  Middlewares/                  wwwroot/           control-plane CSS and JS
+  Persistence/                  Program.cs
+                                AbacusServiceCollectionExtensions.cs
 ```
 
-The library carries no Razor, MVC, Entity Framework, or Redis dependency; an architecture test in the integration suite enforces this.
+The library carries no Razor, MVC, Entity Framework, or Redis dependency; an architecture test in the integration suite enforces this. The same test keeps framework extension points — workflow definitions, host executors, middleware — out of the host shell, carving out only the `Abacus.Run.Service.Workflows.<Name>` namespaces where hosted workflows such as the example live.
 
 ## Test Coverage
 

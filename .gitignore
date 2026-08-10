@@ -422,3 +422,9 @@ docs/
 !docs/
 docs/*
 !docs/wiki.md
+
+# Local SQLite databases written by the host at runtime
+data/
+*.db
+*.db-shm
+*.db-wal
