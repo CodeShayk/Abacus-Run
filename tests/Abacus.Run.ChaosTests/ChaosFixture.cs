@@ -76,11 +76,19 @@ public sealed class ChaosFixture : IAsyncDisposable
         await fresh.StartAsync();
     }
 
+    /// <summary>
+    /// One audit database for the whole fixture, shared by its replicas the way the other stores are
+    /// and separate from the deployed file, which every fixture would otherwise write into.
+    /// </summary>
+    private readonly string _auditDatabasePath =
+        Path.Combine(Path.GetTempPath(), $"abacus-chaos-audit-{Guid.NewGuid():N}.db");
+
     private ReplicaHandle CreateReplica(string replicaId)
     {
         var factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
+                builder.UseSetting("Abacus:AuditRecords:ConnectionString", $"Data Source={_auditDatabasePath}");
                 builder.ConfigureServices(services =>
                 {
                     // Share stores across replicas.
@@ -104,6 +112,15 @@ public sealed class ChaosFixture : IAsyncDisposable
         foreach (ReplicaHandle replica in _replicas)
         {
             await replica.DisposeAsync();
+        }
+
+        // Best-effort: a file left behind is untidy, not a test failure.
+        try
+        {
+            if (File.Exists(_auditDatabasePath)) File.Delete(_auditDatabasePath);
+        }
+        catch (IOException)
+        {
         }
     }
 }

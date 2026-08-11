@@ -115,6 +115,7 @@ public static class HostBuilderExtensions
         services.TryAddSingleton<IApprovalStore, InMemoryApprovalStore>();
         services.TryAddSingleton<IGatePolicyStore, InMemoryGatePolicyStore>();
         services.TryAddSingleton<IAuditStore, InMemoryAuditStore>();
+        services.TryAddSingleton<IAuditRecordStore, InMemoryAuditRecordStore>();
         services.TryAddSingleton<IBlobStore, InMemoryBlobStore>();
 
         services.TryAddSingleton(sp => new OverflowCheckpointStore(
@@ -194,6 +195,7 @@ internal sealed class WorkflowRunnerFactory : IWorkflowRunnerFactory
         ApprovalService = _services.GetRequiredService<IApprovalService>(),
         GatePolicies = _services.GetRequiredService<IGatePolicyStore>(),
         Audit = _services.GetRequiredService<IAuditStore>(),
+        AuditRecords = _services.GetRequiredService<IAuditRecordStore>(),
         Logs = _services.GetRequiredService<ILogStore>(),
         Services = _services,
         Options = _services.GetRequiredService<IOptions<WorkflowHostOptions>>().Value,

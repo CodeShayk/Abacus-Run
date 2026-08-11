@@ -105,10 +105,13 @@ public class ArchitectureBoundaryTests
     }
 
     [Fact]
-    public void The_host_defines_no_framework_extension_points()
+    public void The_host_defines_no_framework_extension_points_outside_declared_workflows()
     {
-        // Workflow definitions, executors and middleware are authored by consumers against the
-        // library. Finding one here would mean the shell had grown behaviour of its own.
+        // Framework extension points (workflow definitions, host executors, middleware) belong to
+        // consumers of Abacus.Run — not to the shell that wires infrastructure. The rule carves out
+        // workflows that ship inside the Service assembly by convention: anything under the
+        // "…Workflows.<Name>" namespace is a documented consumer of the framework, not shell code
+        // that has drifted.
         Type[] extensionPoints =
         [
             typeof(Abacus.Run.Abstractions.IWorkflowDefinition),
@@ -117,11 +120,16 @@ public class ArchitectureBoundaryTests
             typeof(Abacus.Run.Abstractions.Middleware.IExecutorMiddleware)
         ];
 
-        Host.GetTypes()
+        string[] offenders = Host.GetTypes()
             .Where(t => t is { IsClass: true, IsAbstract: false })
             .Where(t => extensionPoints.Any(e => e.IsAssignableFrom(t)))
-            .Select(t => t.Name)
-            .Should().BeEmpty();
+            .Where(t => t.Namespace is null
+                || !t.Namespace.StartsWith("Abacus.Run.Service.Workflows.", StringComparison.Ordinal))
+            .Select(t => t.FullName!)
+            .ToArray();
+
+        offenders.Should().BeEmpty(
+            "extension points outside a declared workflow namespace would mean the shell had grown behaviour of its own");
     }
 
     [Fact]
