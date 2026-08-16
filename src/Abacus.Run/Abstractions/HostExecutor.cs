@@ -71,6 +71,13 @@ public sealed class HostExecutorRuntime
     };
 
     public required string InstanceId { get; init; }
+
+    /// <summary>
+    /// The instance's tenant. Needed by executors that emit something outside the run — a broker
+    /// message must carry it, or a consumer cannot tell whose data it is holding (FR-4.7).
+    /// </summary>
+    public string? TenantId { get; init; }
+
     public required ExecutorDescriptor Descriptor { get; init; }
     public int Attempt { get; init; } = 1;
     public ExecutorDelegate? Pipeline { get; init; }

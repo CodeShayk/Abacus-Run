@@ -3,6 +3,7 @@ using Abacus.Run.Abstractions;
 using Abacus.Run.Abstractions.Middleware;
 using Abacus.Run.Core;
 using Abacus.Run.Dispatch;
+using Abacus.Run.EventBus;
 using Abacus.Run.Middlewares;
 using Abacus.Run.Persistence;
 using Microsoft.Agents.AI.Workflows.Checkpointing;
@@ -70,12 +71,15 @@ public sealed class WorkflowHostBuilder
         return this;
     }
 
-    /// <summary>Runs the dispatcher and the expiry sweeper in this process.</summary>
+    /// <summary>Runs the dispatcher, the expiry sweepers and the broker router in this process.</summary>
     public WorkflowHostBuilder AddBackgroundServices()
     {
         Services.TryAddSingleton<LeaseManager>();
         Services.AddHostedService(sp => sp.GetRequiredService<DispatcherService>());
         Services.AddHostedService<ExpirySweeperService>();
+        Services.AddSingleton<BrokerDispatchService>();
+        Services.AddHostedService(sp => sp.GetRequiredService<BrokerDispatchService>());
+        Services.AddHostedService<EventWaitSweeperService>();
         Services.AddHostedService<RetentionService>();
         Services.AddSingleton<DrainService>();
         Services.AddHostedService(sp => sp.GetRequiredService<DrainService>());
@@ -117,6 +121,7 @@ public static class HostBuilderExtensions
         services.TryAddSingleton<IAuditStore, InMemoryAuditStore>();
         services.TryAddSingleton<IAuditRecordStore, InMemoryAuditRecordStore>();
         services.TryAddSingleton<IBlobStore, InMemoryBlobStore>();
+        services.TryAddSingleton<IEventSubscriptionStore, InMemoryEventSubscriptionStore>();
 
         services.TryAddSingleton(sp => new OverflowCheckpointStore(
             sp.GetRequiredService<IBlobStore>(),
@@ -132,6 +137,14 @@ public static class HostBuilderExtensions
             sp.GetRequiredService<IEventStore>(),
             sp.GetService<IEventBus>(),
             sp.GetRequiredService<IRedactionPolicy>()));
+
+        // The broker is a separate concern from IEventBus: that one fans instance progress out to
+        // SSE, this one carries domain messages between workflows. Local delivery by default; a
+        // distributed transport substitutes for cross-service pub/sub.
+        services.TryAddSingleton<InProcessEventBroker>(sp => new InProcessEventBroker(
+            sp.GetService<ILogger<InProcessEventBroker>>(),
+            sp.GetRequiredService<TimeProvider>()));
+        services.TryAddSingleton<IEventBroker>(sp => sp.GetRequiredService<InProcessEventBroker>());
 
         // Runtime
         services.TryAddSingleton<IWorkflowRegistry>(sp =>
@@ -196,6 +209,7 @@ internal sealed class WorkflowRunnerFactory : IWorkflowRunnerFactory
         GatePolicies = _services.GetRequiredService<IGatePolicyStore>(),
         Audit = _services.GetRequiredService<IAuditStore>(),
         AuditRecords = _services.GetRequiredService<IAuditRecordStore>(),
+        EventSubscriptions = _services.GetService<IEventSubscriptionStore>(),
         Logs = _services.GetRequiredService<ILogStore>(),
         Services = _services,
         Options = _services.GetRequiredService<IOptions<WorkflowHostOptions>>().Value,

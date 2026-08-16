@@ -31,6 +31,9 @@ public sealed class WorkflowRunnerDependencies
     /// <see cref="IAuditedWorkflowDefinition"/>.
     /// </summary>
     public IAuditRecordStore? AuditRecords { get; init; }
+
+    /// <summary>Present when the host runs the event broker; used to drop waits on termination.</summary>
+    public IEventSubscriptionStore? EventSubscriptions { get; init; }
     public ILogStore? Logs { get; init; }
     public IServiceProvider? Services { get; init; }
     public WorkflowHostOptions Options { get; init; } = new();
@@ -240,6 +243,25 @@ public sealed class WorkflowRunner
             }
         }
 
+        // Same reasoning for an event wait: the executor halted and emitted nothing, so the stream
+        // ended with the graph unfinished. Without this the instance would look Completed while a
+        // downstream node had never run.
+        if (_deps.EventSubscriptions is { } subscriptions)
+        {
+            IReadOnlyList<EventSubscription> waits = await subscriptions.QueryAsync(new SubscriptionQuery
+            {
+                InstanceId = instance.InstanceId,
+                Kind = SubscriptionKind.Wait,
+                PendingOnly = true
+            }, cancellationToken).ConfigureAwait(false);
+
+            if (waits.Count > 0)
+            {
+                await TransitionAsync(instance, InstanceStatus.AwaitingInput, null, cancellationToken).ConfigureAwait(false);
+                return new RunOutcome(InstanceStatus.AwaitingInput, null, null, null);
+            }
+        }
+
         await FinalizeAsync(instance, InstanceStatus.Completed, output, null, cancellationToken).ConfigureAwait(false);
         return RunOutcome.Completed(output);
     }
@@ -296,6 +318,7 @@ public sealed class WorkflowRunner
         executor.Runtime = new HostExecutorRuntime
         {
             InstanceId = instance.InstanceId,
+            TenantId = instance.TenantId,
             Descriptor = descriptor,
             Attempt = invocation.Attempt,
             Pipeline = pipeline,
@@ -417,6 +440,13 @@ public sealed class WorkflowRunner
             m.ResultJson = result is null ? null : SafeSerialize(result);
             m.ClearLease = true;
         }, cancellationToken).ConfigureAwait(false);
+
+        // A wait outliving its instance would keep matching messages forever and log a warning for
+        // each one. Terminal means nothing is listening any more.
+        if (_deps.EventSubscriptions is { } subscriptions)
+        {
+            await subscriptions.RemoveForInstanceAsync(instance.InstanceId, cancellationToken).ConfigureAwait(false);
+        }
 
         await PublishAsync(instance, WorkflowEventTypes.WorkflowTerminated, new
         {

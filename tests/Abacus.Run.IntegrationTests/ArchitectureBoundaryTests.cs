@@ -1,5 +1,7 @@
 using System.Reflection;
+using Abacus.Run.Abstractions;
 using Abacus.Run.Api;
+using Abacus.Run.EventBus;
 using Abacus.Run.Service.ControlPlane;
 using Abacus.Run.Core;
 using Abacus.Run.Persistence;
@@ -64,6 +66,7 @@ public class ArchitectureBoundaryTests
         typeof(InstanceLauncher).Assembly.Should().BeSameAs(Library);
         typeof(WorkflowHostBuilder).Assembly.Should().BeSameAs(Library);
         typeof(InMemoryEventBus).Assembly.Should().BeSameAs(Library);
+        typeof(InProcessEventBroker).Assembly.Should().BeSameAs(Library);
         typeof(InMemoryInstanceStore).Assembly.Should().BeSameAs(Library);
         typeof(OverflowCheckpointStore).Assembly.Should().BeSameAs(Library);
     }
@@ -90,7 +93,8 @@ public class ArchitectureBoundaryTests
         Type[] contracts =
         [
             typeof(IInstanceStore), typeof(IEventStore), typeof(ILogStore), typeof(IApprovalStore),
-            typeof(IGatePolicyStore), typeof(IAuditStore), typeof(IBlobStore), typeof(IEventBus)
+            typeof(IGatePolicyStore), typeof(IAuditStore), typeof(IBlobStore), typeof(IEventBus),
+            typeof(IEventBroker), typeof(IEventSubscriptionStore)
         ];
 
         string[] adapters = Host.GetTypes()
