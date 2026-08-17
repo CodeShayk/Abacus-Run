@@ -1,0 +1,444 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://abacus.run/schema/abacus-workflow-dsl-1.0.json",
+  "title": "Abacus workflow DSL",
+  "description": "Declarative workflow definition. Phase 1 (structural) validation only; graph reachability, expression parsing, and catalog resolution are the semantic validator's job.",
+  "type": "object",
+  "required": ["dsl", "name", "version", "start", "nodes"],
+  "additionalProperties": false,
+
+  "properties": {
+    "dsl": {
+      "description": "Media identifier selecting schema and interpreter. Major version must match.",
+      "const": "abacus.workflow/1.0"
+    },
+    "name": { "$ref": "#/$defs/workflowName" },
+    "version": { "$ref": "#/$defs/semver" },
+    "description": { "type": "string", "maxLength": 1024 },
+
+    "context": {
+      "description": "JSON Schema the start payload must satisfy. Enforced by IContextValidatingWorkflow.",
+      "$ref": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "result": {
+      "description": "JSON Schema the workflow result is expected to satisfy. Advisory unless strict.",
+      "$ref": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "strict": {
+      "description": "Enforce declared node input/output schemas at run time. A violation is dead-stop.",
+      "type": "boolean",
+      "default": false
+    },
+
+    "start": { "$ref": "#/$defs/nodeId" },
+    "output": {
+      "description": "Nodes whose result binds the workflow output. Defaults to terminal nodes.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/nodeId" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "edges": {
+      "type": "array",
+      "maxItems": 2000,
+      "items": { "$ref": "#/$defs/edge" }
+    },
+
+    "triggers": { "type": "array", "items": { "$ref": "#/$defs/trigger" } },
+    "notifications": { "$ref": "#/$defs/notifications" },
+    "onFailure": { "type": "array", "items": { "$ref": "#/$defs/failureRule" } },
+    "audit": { "$ref": "#/$defs/audit" },
+    "limits": { "$ref": "#/$defs/limits" }
+  },
+
+  "$defs": {
+    "workflowName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$",
+      "description": "Lowercase kebab-case. Matches the registry's resolution key."
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$",
+      "description": "Stable identity: gate policy, node state and per-node notification overrides all key off it. Renaming one in a published version orphans tenant policy."
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^P(?!$)(\\d+Y)?(\\d+M)?(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+(\\.\\d+)?S)?)?$",
+      "description": "ISO-8601 duration, e.g. PT8H."
+    },
+    "expression": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "description": "AbEx expression. Roots: $ (current data), $ctx (start context), $run (run metadata). Parsed by the semantic validator."
+    },
+    "template": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "String with {{ expression }} interpolation."
+    },
+    "topicPattern": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.*#-]+$",
+      "description": "Dot-segmented topic. '*' matches one segment; '#' matches the remainder and may appear only last."
+    },
+    "principal": {
+      "type": "string",
+      "pattern": "^(user|group|role):[A-Za-z0-9._@-]+$"
+    },
+
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["autonomous", "requireApproval", "conditional"] },
+        "when": { "$ref": "#/$defs/expression" },
+        "reason": { "type": "string", "maxLength": 256 },
+        "assignTo": { "type": "array", "items": { "$ref": "#/$defs/principal" } },
+        "requireApprovers": { "type": "integer", "minimum": 1, "default": 1 },
+        "expiresAfter": { "$ref": "#/$defs/duration", "default": "PT24H" },
+        "onExpiry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": {
+            "action": { "enum": ["deadStop", "reject", "autoApprove", "escalate"] },
+            "assignTo": { "type": "array", "items": { "$ref": "#/$defs/principal" } }
+          }
+        },
+        "allowModification": { "type": "boolean", "default": false },
+        "requireSegregationOfDuties": { "type": "boolean", "default": false },
+        "locked": {
+          "type": "boolean",
+          "default": false,
+          "description": "Author's floor. Tenants may tighten, never loosen."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "conditional" } }, "required": ["mode"] },
+          "then": { "required": ["when"] }
+        },
+        {
+          "if": { "properties": { "onExpiry": { "properties": { "action": { "const": "escalate" } }, "required": ["action"] } }, "required": ["onExpiry"] },
+          "then": { "properties": { "onExpiry": { "required": ["assignTo"] } } }
+        }
+      ]
+    },
+
+    "nodeCommon": {
+      "type": "object",
+      "properties": {
+        "id": { "$ref": "#/$defs/nodeId" },
+        "kind": { "type": "string" },
+        "description": { "type": "string", "maxLength": 512 },
+        "input": { "$ref": "https://json-schema.org/draft/2020-12/schema" },
+        "output": { "$ref": "https://json-schema.org/draft/2020-12/schema" },
+        "gate": { "$ref": "#/$defs/gate" },
+        "notify": {
+          "description": "Workflow-defined notification emitted after this node succeeds. Name is prefixed 'custom.' by the framework.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string", "pattern": "^[A-Za-z0-9]+(\\.[A-Za-z0-9]+)*$" },
+            "payload": { "type": "object", "additionalProperties": { "$ref": "#/$defs/expression" } }
+          }
+        }
+      }
+    },
+
+    "node": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "allOf": [
+        { "$ref": "#/$defs/nodeCommon" },
+        {
+          "properties": {
+            "kind": {
+              "enum": ["transform", "http", "llm", "delay", "approval", "publish", "wait-event", "fan-in", "custom"]
+            }
+          }
+        },
+
+        {
+          "if": { "properties": { "kind": { "const": "transform" } }, "required": ["kind"] },
+          "then": {
+            "required": ["set"],
+            "properties": {
+              "set": {
+                "description": "Target path within data -> AbEx expression. Applied to a copy; source paths read the pre-transform value.",
+                "type": "object",
+                "minProperties": 1,
+                "additionalProperties": { "$ref": "#/$defs/expression" }
+              },
+              "replace": {
+                "type": "boolean",
+                "default": false,
+                "description": "Replace data entirely rather than merging into it."
+              }
+            }
+          }
+        },
+
+        {
+          "if": { "properties": { "kind": { "const": "http" } }, "required": ["kind"] },
+          "then": {
+            "required": ["url"],
+            "properties": {
+              "method": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], "default": "GET" },
+              "url": { "$ref": "#/$defs/template" },
+              "headers": { "type": "object", "additionalProperties": { "$ref": "#/$defs/template" } },
+              "body": { "$ref": "#/$defs/template" },
+              "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 600, "default": 30 },
+              "successCodes": { "type": "array", "items": { "type": "integer", "minimum": 100, "maximum": 599 } },
+              "allowedHosts": { "type": "array", "items": { "type": "string", "format": "hostname" } },
+              "sendIdempotencyKey": { "type": "boolean", "default": true }
+            }
+          }
+        },
+
+        {
+          "if": { "properties": { "kind": { "const": "llm" } }, "required": ["kind"] },
+          "then": {
+            "required": ["model", "prompt"],
+            "properties": {
+              "model": { "type": "string", "minLength": 1 },
+              "system": { "$ref": "#/$defs/template" },
+              "prompt": { "$ref": "#/$defs/template" },
+              "promptVersion": { "type": "string", "maxLength": 64 },
+              "structuredOutput": { "$ref": "https://json-schema.org/draft/2020-12/schema" },
+              "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+              "maxTokens": { "type": "integer", "minimum": 1 },
+              "streamDeltas": { "type": "boolean", "default": false },
+              "emitCompletion": { "type": "boolean", "default": true }
+            }
+          }
+        },
+
+        {
+          "if": { "properties": { "kind": { "const": "delay" } }, "required": ["kind"] },
+          "then": {
+            "required": ["for"],
+            "properties": {
+              "for": { "$ref": "#/$defs/duration" }
+            }
+          }
+        },
+
+        {
+          "if": { "properties": { "kind": { "const": "publish" } }, "required": ["kind"] },
+          "then": {
+            "required": ["topic"],
+            "properties": {
+              "topic": { "$ref": "#/$defs/topicPattern" },
+              "payload": { "type": "object", "additionalProperties": { "$ref": "#/$defs/expression" } },
+              "correlationKey": { "$ref": "#/$defs/expression" },
+              "scope": { "enum": ["local", "distributed"], "default": "local" }
+            }
+          }
+        },
+
+        {
+          "if": { "properties": { "kind": { "const": "wait-event" } }, "required": ["kind"] },
+          "then": {
+            "required": ["topic"],
+            "properties": {
+              "topic": { "$ref": "#/$defs/topicPattern" },
+              "correlationKey": { "$ref": "#/$defs/expression" },
+              "timeout": { "$ref": "#/$defs/duration" },
+              "onExpiry": { "enum": ["deadStop", "resume"], "default": "deadStop" }
+            }
+          }
+        },
+
+        {
+          "if": { "properties": { "kind": { "const": "fan-in" } }, "required": ["kind"] },
+          "then": {
+            "properties": {
+              "into": {
+                "type": "string",
+                "default": "items",
+                "description": "Path within data receiving the aggregated array."
+              }
+            }
+          }
+        },
+
+        {
+          "if": { "properties": { "kind": { "const": "custom" } }, "required": ["kind"] },
+          "then": {
+            "required": ["node"],
+            "properties": {
+              "node": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$",
+                "description": "Name registered via AddDslNode. Resolved at startup; unknown names fail registration."
+              },
+              "with": {
+                "type": "object",
+                "description": "Validated against the factory's own published schema by the semantic validator."
+              }
+            }
+          }
+        },
+
+        {
+          "$comment": "A raw-equivalent node cannot be gated, mirroring RawNode in the compiled API.",
+          "if": { "properties": { "kind": { "const": "fan-in" } }, "required": ["kind"] },
+          "then": { "not": { "required": ["gate"] } }
+        }
+      ]
+    },
+
+    "edge": {
+      "type": "object",
+      "required": ["from", "to"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "oneOf": [
+            { "$ref": "#/$defs/nodeId" },
+            { "type": "array", "items": { "$ref": "#/$defs/nodeId" }, "minItems": 2, "uniqueItems": true }
+          ],
+          "description": "An array means a fan-in barrier: the target runs once every source has delivered."
+        },
+        "to": {
+          "oneOf": [
+            { "$ref": "#/$defs/nodeId" },
+            { "type": "array", "items": { "$ref": "#/$defs/nodeId" }, "minItems": 2, "uniqueItems": true }
+          ],
+          "description": "An array means fan-out to every target, or to the subset 'select' picks."
+        },
+        "when": {
+          "$ref": "#/$defs/expression",
+          "description": "Edge is traversed only when this evaluates to boolean true. Must be deterministic."
+        },
+        "select": {
+          "$ref": "#/$defs/expression",
+          "description": "Fan-out only: yields the indices of targets to send to."
+        },
+        "label": { "type": "string", "maxLength": 64 },
+        "idempotent": { "type": "boolean", "default": false }
+      },
+      "allOf": [
+        {
+          "$comment": "A barrier has one target and no condition; conditions on a barrier are ambiguous.",
+          "if": { "properties": { "from": { "type": "array" } }, "required": ["from"] },
+          "then": {
+            "properties": { "to": { "$ref": "#/$defs/nodeId" } },
+            "not": { "anyOf": [{ "required": ["when"] }, { "required": ["select"] }] }
+          }
+        },
+        {
+          "$comment": "'select' only means something when there are several targets.",
+          "if": { "required": ["select"] },
+          "then": { "properties": { "to": { "type": "array" } } }
+        }
+      ]
+    },
+
+    "trigger": {
+      "type": "object",
+      "required": ["topic"],
+      "additionalProperties": false,
+      "properties": {
+        "topic": { "$ref": "#/$defs/topicPattern" },
+        "correlationKey": { "$ref": "#/$defs/expression" },
+        "contextFrom": {
+          "$ref": "#/$defs/expression",
+          "description": "Builds the start context from the triggering message. Defaults to the whole payload."
+        }
+      }
+    },
+
+    "notifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": { "enum": ["minimal", "lifecycle", "standard"], "default": "standard" },
+        "stream": {
+          "type": "boolean",
+          "default": true,
+          "description": "Live SSE fan-out. The durable event log is not optional and cannot be disabled."
+        },
+        "byNode": {
+          "type": "object",
+          "additionalProperties": { "enum": ["minimal", "lifecycle", "standard"] }
+        },
+        "emits": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9]+(\\.[A-Za-z0-9]+)*$" },
+          "description": "Workflow-defined names, declared without the 'custom.' prefix."
+        }
+      }
+    },
+
+    "failureRule": {
+      "type": "object",
+      "required": ["match", "disposition"],
+      "additionalProperties": false,
+      "properties": {
+        "match": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "exception": {
+              "enum": [
+                "WorkflowDeadStopException",
+                "ApprovalRejectedException",
+                "WorkflowValidationException",
+                "StructuredOutputException",
+                "ApiCallFailureException",
+                "LlmRateLimitException",
+                "LlmOverloadedException",
+                "DslContractException"
+              ],
+              "description": "Whitelist. A document cannot name arbitrary types."
+            },
+            "status": { "type": "string", "pattern": "^([1-5]xx|[1-5]\\d{2})$" },
+            "node": { "$ref": "#/$defs/nodeId" }
+          }
+        },
+        "disposition": { "enum": ["retry", "deadStop", "escalate"] }
+      }
+    },
+
+    "audit": {
+      "type": "object",
+      "required": ["sections"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "$ref": "#/$defs/expression", "description": "Business key the record is opened under." },
+        "sections": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" }
+        }
+      }
+    },
+
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5 },
+        "maxLifetimeHours": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}
