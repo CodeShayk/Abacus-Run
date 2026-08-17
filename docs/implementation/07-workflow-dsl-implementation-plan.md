@@ -1,6 +1,6 @@
 # Workflow DSL — implementation plan
 
-Realizes [workflow-dsl-design.md](workflow-dsl-design.md). Nothing here changes how a compiled
+Realizes [06-workflow-dsl-design.md](06-workflow-dsl-design.md). Nothing here changes how a compiled
 workflow behaves; the DSL is a second front end onto the runtime that already exists.
 
 **Status: not started — awaiting design review.**
@@ -40,7 +40,7 @@ src/Abacus.Run.Dsl/
   Schema/         abacus-workflow-dsl-1.0.json  (embedded resource)
 ```
 
-The schema is authored at [docs/schema/abacus-workflow-dsl-1.0.json](schema/abacus-workflow-dsl-1.0.json)
+The schema is authored at [docs/schema/abacus-workflow-dsl-1.0.json](../schema/abacus-workflow-dsl-1.0.json)
 and embedded from there — one copy, so the published schema and the enforced one cannot drift. A test
 asserts the embedded resource is byte-identical to the file.
 
@@ -249,7 +249,7 @@ node. Strict mode rejects a shape violation as dead-stop.
 ### 4.1 The one core change
 
 `IContextValidatingWorkflow` in `Abacus.Run/Abstractions`, consulted by
-[`WorkflowRegistry.ValidateContext`](../src/Abacus.Run/Core/WorkflowRegistry.cs) **after** the
+[`WorkflowRegistry.ValidateContext`](../../src/Abacus.Run/Core/WorkflowRegistry.cs) **after** the
 existing type bind succeeds. Additive and opt-in: a definition that does not implement it behaves
 exactly as today.
 
