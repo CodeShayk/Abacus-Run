@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Abacus.Run.Dsl</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <IsPackable>true</IsPackable>
+    <PackageId>Abacus.Run.Dsl</PackageId>
+    <Version>1.0.0</Version>
+    <Title>Abacus Run DSL - declarative workflow authoring</Title>
+    <Authors>Najaf Shaikh</Authors>
+    <Company>CodeShayk</Company>
+    <Product>Abacus Run</Product>
+    <Description>
+      Authors an Abacus Run workflow as a JSON document instead of C#. Validates against a published
+      JSON Schema, reports pointer-accurate diagnostics, and interprets the document onto the same
+      runtime a compiled definition uses. Separate from Abacus.Run so a host that authors every
+      workflow in code carries neither the schema validator nor the expression parser.
+    </Description>
+    <PackageTags>workflow;dsl;json-schema;declarative;orchestration;dotnet</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/CodeShayk/Abacus-Run</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/CodeShayk/Abacus-Run</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <Copyright>Copyright (c) 2025 Najaf Shaikh</Copyright>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- One copy of the schema. The published file under docs/ is the source, embedded from there,
+         so the schema an editor reads and the schema the host enforces cannot drift. -->
+    <EmbeddedResource Include="../../docs/schema/abacus-workflow-dsl-1.0.json"
+                      LogicalName="Abacus.Run.Dsl.Schema.abacus-workflow-dsl-1.0.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Abacus.Run/Abacus.Run.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="JsonSchema.Net" Version="7.3.4" />
+  </ItemGroup>
+</Project>

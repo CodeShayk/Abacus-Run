@@ -3,11 +3,11 @@
 Realizes [06-workflow-dsl-design.md](06-workflow-dsl-design.md). Nothing here changes how a compiled
 workflow behaves; the DSL is a second front end onto the runtime that already exists.
 
-**Status: not started — awaiting design review.**
+**Status: in progress.**
 
 | # | Phase | Delivers | Depends on | Status |
 | - | ----- | -------- | ---------- | ------ |
-| 1 | Envelope and expression core | `DslMessage`, AbEx parser and evaluator | — | ⬜ Not started |
+| 1 | Envelope and expression core | `DslMessage`, AbEx parser and evaluator | — | ✅ Done — 207 tests |
 | 2 | Document model and validation | Parser, JSON Schema, semantic validator, diagnostics | 1 | ⬜ Not started |
 | 3 | Interpreter | `DslWorkflowDefinition`, node factories, graph construction | 1, 2 | ⬜ Not started |
 | 4 | Host integration | Registration, `IContextValidatingWorkflow`, catalog and validate endpoints | 3 | ⬜ Not started |
