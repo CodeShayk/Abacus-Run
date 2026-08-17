@@ -56,6 +56,7 @@ public sealed class InstanceControlService : IInstanceControl
     private readonly IAuditStore _audit;
     private readonly IWorkflowRegistry _registry;
     private readonly ICheckpointDescriber? _checkpoints;
+    private readonly IControlChannel? _control;
     private readonly TimeProvider _clock;
 
     public InstanceControlService(
@@ -66,7 +67,8 @@ public sealed class InstanceControlService : IInstanceControl
         IAuditStore audit,
         IWorkflowRegistry registry,
         ICheckpointDescriber? checkpoints = null,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        IControlChannel? control = null)
     {
         _instances = instances;
         _approvals = approvals;
@@ -75,7 +77,33 @@ public sealed class InstanceControlService : IInstanceControl
         _audit = audit;
         _registry = registry;
         _checkpoints = checkpoints;
+        _control = control;
         _clock = clock ?? TimeProvider.System;
+    }
+
+    /// <summary>
+    /// Tells whichever replica is running the instance to stop. Best-effort by design: the row has
+    /// already been written and is the authority, so a signal that fails to send costs the time until
+    /// the owning replica notices for itself — never correctness.
+    /// </summary>
+    private async Task SignalAsync(string instanceId, string action, string? reason, CancellationToken cancellationToken)
+    {
+        if (_control is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _control
+                .PublishAsync(new ControlSignal(instanceId, action, reason, _clock.GetUtcNow()), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Swallowed on purpose: failing the operator's control action because the notification
+            // did not send would be reporting a failure for something that already succeeded.
+        }
     }
 
     public async Task<ControlResult> CancelAsync(
@@ -95,8 +123,8 @@ public sealed class InstanceControlService : IInstanceControl
 
         DateTimeOffset now = _clock.GetUtcNow();
 
-        // Cooperative: the owning replica observes CancellationRequested and unwinds. When no replica
-        // owns it, this transition alone is sufficient.
+        // The row is the authority and is written first, so the outcome is decided even if
+        // everything below fails. A replica that never hears the signal still finds this.
         await _instances.UpdateAsync(instanceId, m =>
         {
             m.Status = InstanceStatus.Cancelled;
@@ -105,6 +133,10 @@ public sealed class InstanceControlService : IInstanceControl
             m.TerminalReason = reason ?? "Cancelled by operator.";
             m.ClearLease = true;
         }, cancellationToken).ConfigureAwait(false);
+
+        // Then tell the owning replica, which may not be this one. Without this the run continues
+        // to completion — committing side effects — while the row reads Cancelled.
+        await SignalAsync(instanceId, ControlActions.Cancel, reason, cancellationToken).ConfigureAwait(false);
 
         // Orphaned approvals would otherwise sit in queues forever.
         await _approvals.CancelForInstanceAsync(instanceId, cancellationToken).ConfigureAwait(false);
@@ -269,6 +301,10 @@ public sealed class InstanceControlService : IInstanceControl
             m.Status = InstanceStatus.Suspended;
             m.ClearLease = true;
         }, cancellationToken).ConfigureAwait(false);
+
+        // Same reasoning as cancel: a suspended instance still running on another replica would keep
+        // taking steps after an operator asked it to stop.
+        await SignalAsync(instanceId, ControlActions.Suspend, reason, cancellationToken).ConfigureAwait(false);
 
         await EmitAsync(instance, WorkflowEventTypes.InstanceSuspended,
             new { reason, actor = ActorOf(user) }, cancellationToken).ConfigureAwait(false);
