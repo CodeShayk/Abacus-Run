@@ -104,8 +104,14 @@ public class ArchitectureBoundaryTests
             .ToArray();
 
         adapters.Should().NotBeEmpty("the host exists to supply concrete infrastructure");
+
+        // The prefix is the technology the adapter speaks. Adding one here is a deliberate act;
+        // an adapter named for what it does rather than what it talks to is framework logic that
+        // has drifted back into the deployable.
+        string[] technologies = ["SqlServer", "Redis", "RabbitMq", "Sqlite"];
+
         adapters.Should().OnlyContain(
-            n => n.StartsWith("SqlServer", StringComparison.Ordinal) || n.StartsWith("Redis", StringComparison.Ordinal));
+            n => technologies.Any(t => n.StartsWith(t, StringComparison.Ordinal)));
     }
 
     [Fact]

@@ -167,6 +167,12 @@ public static WorkflowHostBuilder AddAbacus(this IServiceCollection services, IC
         services.AddRedisEventBroker(redis, maxStreamLength: 100_000);  // cross-service pub/sub
     }
 
+    // Or RabbitMQ instead of the Redis broker — one or the other, not both.
+    if (configuration["Abacus:RabbitMq:ConnectionString"] is { Length: > 0 } amqp)
+    {
+        services.AddRabbitMqEventBroker(amqp);
+    }
+
     return host;
 }
 ```
@@ -375,9 +381,20 @@ days.
 
 Topic filters use `*` for one segment and `#` for the remainder. Scope travels on the message —
 `Local` by default, so the same publishing code is correct in one service and in a fleet.
-`InProcessEventBroker` is registered by default; `AddRedisEventBroker` replaces it for cross-service
-pub/sub, and an impossible combination is rejected at composition time rather than failing silently
-in production.
+`InProcessEventBroker` is registered by default; `AddRedisEventBroker` or `AddRabbitMqEventBroker`
+replaces it for cross-service pub/sub, and an impossible combination is rejected at composition time
+rather than failing silently in production.
+
+| Transport | Reach | Competing consumers | Replay | Dead letter |
+| --- | --- | --- | --- | --- |
+| `InProcessEventBroker` *(default)* | This service | Yes | No | No |
+| `RedisEventBroker` | Every service | Yes | Yes | Yes |
+| `RabbitMqEventBroker` | Every service | Yes | No | Yes |
+
+Redis filters client-side and can replay from a stream. RabbitMQ filters server-side at a topic
+exchange, so a subscriber is never woken for a message it would discard, and reports
+`SupportsReplay: false` rather than quietly behaving as `Now` — a queue holds what arrives after it
+is bound. Both are verified against real servers in `tests/Abacus.Run.BrokerTests`.
 
 Full walkthrough: [Events, history, and SSE](docs/wiki.md#events-history-and-sse) and
 [Event broker](docs/wiki.md#event-broker-and-event-driven-workflows).
@@ -511,6 +528,7 @@ at startup.
 | `tests/Abacus.Run.UnitTests` | Unit coverage for runtime behavior; references the library only |
 | `tests/Abacus.Run.IntegrationTests` | HTTP, control-plane, and architecture-boundary coverage against the real host |
 | `tests/Abacus.Run.ChaosTests` | Failure and lifecycle resilience coverage |
+| `tests/Abacus.Run.BrokerTests` | The distributed brokers against real Redis and RabbitMQ, via Testcontainers |
 | `tests/Abacus.Run.LoadTests` | Load-oriented test project |
 
 Folders inside each project:
@@ -539,3 +557,11 @@ dotnet test Abacus.Run.slnx --no-restore
 ```
 
 The integration tests exercise the real ASP.NET Core host and its HTTP endpoints; unit tests cover the runtime components and stores independently.
+
+`Abacus.Run.BrokerTests` is the one suite with an external dependency, and deliberately so — a transport claim that has never touched the wire is not a verified claim. Testcontainers starts Redis and RabbitMQ itself, so there is nothing to run beforehand:
+
+```bash
+dotnet test tests/Abacus.Run.BrokerTests/Abacus.Run.BrokerTests.csproj
+```
+
+Without a container runtime these tests report as **skipped** rather than failed, so a machine or CI leg without Docker still gets a green suite. Watch for that in the output: a run reporting skips has verified nothing about the transports.

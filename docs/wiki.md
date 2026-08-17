@@ -43,7 +43,7 @@ This page is the repository-level technical wiki. It documents the implementatio
 | Checkpoint cadence | Superstep by default; `None`, `SuperStep`, and `Manual` are supported |
 | Ownership | Dispatcher and lease abstractions are used by the host; the default stores are process-local |
 | Events | Sequenced per-instance event store plus optional event bus and SSE relay; nodes emit their own via `Runtime.Notify`, and a definition sets its emission policy |
-| Event broker | Topic pub/sub for event-driven pipelines: workflows start on a trigger or park on a wait. Local in-process by default, Redis Streams for cross-service |
+| Event broker | Topic pub/sub for event-driven pipelines: workflows start on a trigger or park on a wait. Local in-process by default; Redis Streams or RabbitMQ for cross-service |
 | Approvals | Durable approval contracts and in-memory coordinator/store, with decision and expiry handling |
 | Middleware | Workflow-level and host-executor-level pipelines |
 | Audit records | A workflow declares the shape of its own audit record; the runtime hands every node a recorder and stores entries generically |
@@ -853,8 +853,18 @@ The same publishing code is therefore correct in a single service and in a fleet
 | --- | --- | --- | --- | --- |
 | `InProcessEventBroker` *(default)* | This service | Yes | No | No |
 | `RedisEventBroker` *(`AddRedisEventBroker`)* | Every service | Yes | Yes | Yes |
+| `RabbitMqEventBroker` *(`AddRabbitMqEventBroker`)* | Every service | Yes | No | Yes |
 
-`RedisEventBroker` is the in-process broker *plus a wire*, not a second implementation. Local messages never touch Redis. Distributed ones go to a Redis Stream and come back to every service through its own consumer, including the publisher's own — publishing does not also deliver locally, because that would deliver twice. Consumer groups carry the distinction between routing work and observing it: a named `ConsumerGroup` means exactly one member of the fleet handles each message, an unnamed one gets a private group and sees its own copy.
+Each distributed broker is the in-process broker *plus a wire*, not a second implementation. Local messages never leave the process. Distributed ones go onto the transport and come back to every service through its own consumer, including the publisher's own — publishing does not also deliver locally, because that would deliver twice. Consumer groups carry the distinction between routing work and observing it: a named `ConsumerGroup` means exactly one member of the fleet handles each message, an unnamed one gets a private group and sees its own copy.
+
+The two differ in where filtering happens and in what they can honestly claim:
+
+- **Redis** publishes to one stream and filters client-side, so a subscriber is woken for traffic it then discards. It can replay, because a stream retains.
+- **RabbitMQ** publishes to a topic exchange and filters server-side by routing key, so a subscriber is only woken for what it asked for. It cannot replay — a queue holds what arrives after it is bound — and `SupportsReplay` says so rather than quietly behaving as `Now`. Dead-lettering is native.
+
+The topic vocabularies happen to agree: AMQP's `*` is one word and `#` is the remainder, which is exactly what `TopicPattern` means, so filters pass through unchanged.
+
+Register one or the other, not both — the second registration replaces the first.
 
 Publishing `Distributed` against an in-process broker fails invisibly — the message still reaches every local subscriber and simply never leaves the host. So a broker publishes a `BrokerCapabilities` record and an impossible combination is rejected at composition time: a mismatched executor throws in its constructor, and `POST /events` returns `400` rather than `202`.
 
@@ -1079,6 +1089,7 @@ select the concrete infrastructure it substitutes for the in-memory defaults:
     "AuditRecords": { "ConnectionString": "Data Source=./data/abacus-audit.db" },
     "SqlServer": { "ConnectionString": "", "EnsureDatabaseCreated": false },
     "Redis": { "ConnectionString": "", "MaxStreamLength": 10000, "MaxBrokerStreamLength": 100000 },
+    "RabbitMq": { "ConnectionString": "" },
     "Llm": {
       "Pricing": {
         "claude-sonnet-5": { "InputPerMillion": 3.00, "OutputPerMillion": 15.00 }
@@ -1090,6 +1101,11 @@ select the concrete infrastructure it substitutes for the in-memory defaults:
 
 `Abacus:Redis:MaxBrokerStreamLength` is larger than `MaxStreamLength` because one broker stream
 carries every topic for the whole deployment, while the event streams are per instance.
+
+`Abacus:RabbitMq:ConnectionString` is an AMQP URI. Setting it selects RabbitMQ as the event broker in
+place of Redis Streams; the Redis event bus, which is a separate concern, is unaffected. Setting both
+Redis and RabbitMQ therefore gives you Redis for SSE fan-out and RabbitMQ for domain messages, which
+is a legitimate deployment rather than a misconfiguration.
 
 `Abacus:Llm:Pricing` is what turns token counts into cost on `llm.completed` and into a drift signal.
 A model with no entry reports `null` rather than zero — "we do not know" and "it was free" are
@@ -1268,7 +1284,18 @@ The solution includes several test layers:
 | Unit tests | Contracts, policies, runner behavior, middleware, executors, stores, audit recorder, and control logic |
 | Integration tests | Real ASP.NET Core host, HTTP routes, event streams, approvals, instance controls, the instance state route, and the example workflow end to end |
 | Chaos tests | Failure and lifecycle scenarios |
+| Broker tests | The distributed brokers against real Redis and RabbitMQ, via Testcontainers |
 | Load tests | Throughput-oriented test project |
+
+Every suite except the broker tests runs with no external dependency, which is what keeps a clone
+testable on a fresh machine. `Abacus.Run.BrokerTests` is the deliberate exception: a transport claim
+that has never touched the wire is not a verified claim, and no in-memory double can tell you whether
+a Redis consumer group or an AMQP topic exchange behaves the way the abstraction says it does.
+
+Testcontainers starts and disposes the containers itself, so there is nothing to run beforehand. When
+no container runtime is present the tests report as **skipped** rather than failed — a machine or CI
+leg without Docker still gets a green suite instead of a red one it cannot fix. Watch for that in the
+output: a run reporting skips has verified nothing about the transports.
 
 Common commands:
 
@@ -1281,6 +1308,9 @@ dotnet test --configuration Release --no-build --collect:"XPlat Code Coverage"
 
 # One project
 dotnet test tests/Abacus.Run.UnitTests/Abacus.Run.UnitTests.csproj
+
+# The distributed brokers against real Redis and RabbitMQ (needs Docker)
+dotnet test tests/Abacus.Run.BrokerTests/Abacus.Run.BrokerTests.csproj
 
 # One test by name
 dotnet test tests/Abacus.Run.UnitTests/Abacus.Run.UnitTests.csproj \
@@ -1338,7 +1368,7 @@ An envelope marked `Transient` must be relayed but **not** persisted, and carrie
 
 ### Custom event brokers
 
-Implement `IEventBroker` to carry domain messages over a transport of your choosing — Azure Service Bus, Kafka, NATS. Register it in place of the default `InProcessEventBroker`; `AddRedisEventBroker` is the worked example.
+Implement `IEventBroker` to carry domain messages over a transport of your choosing — Azure Service Bus, Kafka, NATS. Register it in place of the default `InProcessEventBroker`. `RedisEventBroker` and `RabbitMqEventBroker` are the two worked examples, and they differ enough to be worth reading as a pair: one filters client-side and can replay, the other filters at the exchange and cannot.
 
 Three obligations:
 
