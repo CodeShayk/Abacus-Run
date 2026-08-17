@@ -15,6 +15,34 @@ public interface IHostExecutor
     IReadOnlyDictionary<string, object?> Metadata { get; }
 }
 
+/// <summary>
+/// Lets a node put something on its instance's event stream, so a watcher can see work the framework
+/// has no way to describe on the author's behalf.
+/// </summary>
+public interface INodeNotifier
+{
+    /// <summary>
+    /// Emits <c>custom.&lt;name&gt;</c>. The prefix is applied here and cannot be opted out of, so a
+    /// workflow can never shadow a framework event however it names its own.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The name is empty, contains whitespace, or has a leading or trailing dot. A malformed type is
+    /// indistinguishable from an event that was never sent, so this throws rather than emitting one.
+    /// </exception>
+    ValueTask NotifyAsync(string name, object payload, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Framework-facing: emits a reserved event type with a published shape, such as
+    /// <see cref="WorkflowEventTypes.LlmCompleted"/>.
+    /// </summary>
+    /// <remarks>
+    /// Public because the built-in executors live outside this assembly's core, but guarded — the
+    /// type must be one the framework declares, which is what keeps <see cref="NotifyAsync"/> the
+    /// only door open to workflow authors.
+    /// </remarks>
+    ValueTask EmitReservedAsync(string eventType, object payload, bool transient, CancellationToken cancellationToken);
+}
+
 /// <summary>What a gate evaluation concluded for one invocation.</summary>
 public enum GateOutcomeKind
 {
@@ -91,6 +119,12 @@ public sealed class HostExecutorRuntime
     /// progresses. Null when the workflow keeps no audit record.
     /// </summary>
     public IWorkflowAuditRecorder? Audit { get; init; }
+
+    /// <summary>
+    /// Present when the executor is attached to a host. Null outside one, exactly like
+    /// <see cref="Audit"/>, so an executor exercised in isolation costs nothing.
+    /// </summary>
+    public INodeNotifier? Notify { get; init; }
 
     /// <summary>Called when a host executor begins handling a message, before gate evaluation.</summary>
     public Func<string, int, ValueTask>? ExecutorInvoked { get; init; }

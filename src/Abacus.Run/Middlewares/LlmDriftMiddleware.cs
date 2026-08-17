@@ -20,6 +20,14 @@ public sealed record DriftSample
     public bool IsRefusal { get; init; }
     public bool SchemaFailed { get; init; }
     public string? FinishReason { get; init; }
+
+    /// <summary>
+    /// Null when the model has no configured price. Unpriced samples are excluded from the cost
+    /// baseline rather than counted as zero, so an unpriced period cannot make a later rise look
+    /// smaller than it is.
+    /// </summary>
+    public decimal? CostUsd { get; init; }
+
     public required DateTimeOffset At { get; init; }
 }
 
@@ -34,6 +42,14 @@ public sealed record DriftBaseline
     public required double RefusalRate { get; init; }
     public required double SchemaFailureRate { get; init; }
     public string? ModelId { get; init; }
+
+    /// <summary>
+    /// Null until enough priced samples exist. Cost is the signal that catches what token counts
+    /// miss — a provider silently routing to a pricier model, or a prompt that has quietly grown.
+    /// </summary>
+    public double? CostMean { get; init; }
+
+    public double? CostStdDev { get; init; }
 }
 
 public sealed record DriftBreach(string Signal, double Baseline, double Observed, double Deviation);
@@ -146,6 +162,7 @@ public sealed class LlmDriftMiddleware : IExecutorMiddleware
             IsRefusal = RefusalDetector.IsRefusal(result?.Text),
             SchemaFailed = context.Exception is StructuredOutputException,
             FinishReason = result?.FinishReason,
+            CostUsd = result?.CostUsd,
             At = _clock.GetUtcNow()
         };
 
@@ -207,6 +224,13 @@ public static class DriftDetector
 
         AddIfBreached(breaches, "latency", baseline.LatencyMean, baseline.LatencyStdDev, sample.LatencyMs, sigma);
         AddIfBreached(breaches, "output_tokens", baseline.OutputTokenMean, baseline.OutputTokenStdDev, sample.OutputTokens, sigma);
+
+        // Only when both sides are priced. Comparing a priced call against an unpriced baseline, or
+        // the reverse, would report a breach that says nothing about the model's behaviour.
+        if (sample.CostUsd is { } cost && baseline.CostMean is { } costMean && baseline.CostStdDev is { } costStdDev)
+        {
+            AddIfBreached(breaches, "cost", costMean, costStdDev, (double)cost, sigma);
+        }
 
         // Rates are compared as absolute deltas: a stddev over a Bernoulli rate is not meaningful
         // at the sample sizes involved.
@@ -285,8 +309,17 @@ public sealed class InMemoryDriftBaselineStore : IDriftBaselineStore
             double[] latencies = window.Select(s => s.LatencyMs).ToArray();
             double[] outputs = window.Select(s => (double)s.OutputTokens).ToArray();
 
+            // Unpriced samples are excluded rather than counted as zero: an unpriced stretch would
+            // otherwise drag the mean down and hide a genuine cost rise that followed it.
+            double[] costs = window
+                .Where(s => s.CostUsd is not null)
+                .Select(s => (double)s.CostUsd!.Value)
+                .ToArray();
+
             return ValueTask.FromResult<DriftBaseline?>(new DriftBaseline
             {
+                CostMean = costs.Length > 0 ? Mean(costs) : null,
+                CostStdDev = costs.Length > 0 ? StdDev(costs) : null,
                 Key = key,
                 SampleCount = window.Count,
                 LatencyMean = Mean(latencies),

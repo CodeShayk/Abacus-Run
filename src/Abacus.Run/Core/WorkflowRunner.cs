@@ -52,6 +52,12 @@ public sealed class WorkflowRunner
     private string? _latestCheckpointId;
     private readonly Queue<string> _hostInvocationEvents = new();
 
+    /// <summary>
+    /// Resolved once per run rather than per event, so the hot path is a dictionary lookup. Defaults
+    /// to emitting everything when the definition declares no policy.
+    /// </summary>
+    private NotificationPolicy _notifications = NotificationPolicy.Default;
+
     public WorkflowRunner(WorkflowRunnerDependencies dependencies)
         => _deps = dependencies ?? throw new ArgumentNullException(nameof(dependencies));
 
@@ -112,6 +118,10 @@ public sealed class WorkflowRunner
         CancellationToken cancellationToken)
     {
         var gates = new Dictionary<string, ApprovalGate>(StringComparer.Ordinal);
+
+        _notifications = descriptor.Definition is INotifyingWorkflow notifying
+            ? notifying.Notifications
+            : NotificationPolicy.Default;
 
         // A definition that declares an audit record gets a recorder bound to its declared shape;
         // one that doesn't gets null, and the hook costs it nothing.
@@ -227,6 +237,21 @@ public sealed class WorkflowRunner
                     return await ApplyFailureAsync(instance, descriptor, "workflow", error, cancellationToken)
                         .ConfigureAwait(false);
                 }
+
+                case LlmDeltaWorkflowEvent delta:
+                    await PublishTransientAsync(instance, WorkflowEventTypes.LlmDelta,
+                        new { executorId = delta.ExecutorId, delta = delta.Delta },
+                        delta.ExecutorId, cancellationToken).ConfigureAwait(false);
+                    break;
+
+                default:
+                    // The class of bug rather than one instance of it: an unrecognised engine event
+                    // used to vanish in silence, which is how llm.delta stayed broken while being
+                    // written down in three places.
+                    _deps.Logger.LogDebug(
+                        "Unhandled workflow event {EventType} on instance {InstanceId}.",
+                        evt.GetType().Name, instance.InstanceId);
+                    break;
             }
         }
 
@@ -328,6 +353,10 @@ public sealed class WorkflowRunner
             Approvals = _deps.ApprovalService,
             Services = _deps.Services,
             Audit = audit,
+            Notify = new NodeNotifier(
+                instance.InstanceId, instance.TenantId, executor.Id,
+                _deps.Events, _deps.Sequencer, _notifications,
+                () => _currentSuperstep, _deps.Clock),
             ExecutorInvoked = async (executorId, superstep) =>
             {
                 _hostInvocationEvents.Enqueue(executorId);
@@ -468,11 +497,43 @@ public sealed class WorkflowRunner
 
     private ValueTask PublishAsync(
         WorkflowInstance instance, string eventType, object payload, string? executorId, CancellationToken cancellationToken)
-        => _deps.Events.PublishAsync(
+    {
+        // Before Next(), never after. A suppressed event that had already consumed a sequence number
+        // would leave a hole in the gapless sequence, and Last-Event-ID catch-up would wait forever
+        // for an event that is never coming.
+        if (!_notifications.ShouldEmit(eventType, executorId))
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        return _deps.Events.PublishAsync(
             EventFactory.Create(
                 instance.InstanceId, _deps.Sequencer.Next(instance.InstanceId), eventType, payload,
                 executorId, _currentSuperstep, instance.TenantId, _deps.Clock.GetUtcNow()),
             cancellationToken);
+    }
+
+    /// <summary>
+    /// Live fan-out with no durable record and no sequence number. Used for streamed tokens, where
+    /// the complete text is in the executor's output and a replayed chunk would mean nothing.
+    /// </summary>
+    private ValueTask PublishTransientAsync(
+        WorkflowInstance instance, string eventType, object payload, string? executorId, CancellationToken cancellationToken)
+    {
+        if (!_notifications.ShouldEmit(eventType, executorId))
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        return _deps.Events.PublishAsync(
+            EventFactory.Create(
+                instance.InstanceId, 0, eventType, payload,
+                executorId, _currentSuperstep, instance.TenantId, _deps.Clock.GetUtcNow()) with
+            {
+                Transient = true
+            },
+            cancellationToken);
+    }
 
     private ValueTask LogAsync(
         WorkflowInstance instance, string level, string? executorId, Exception error, CancellationToken cancellationToken)

@@ -146,9 +146,33 @@ public static class HostBuilderExtensions
             sp.GetRequiredService<TimeProvider>()));
         services.TryAddSingleton<IEventBroker>(sp => sp.GetRequiredService<InProcessEventBroker>());
 
+        // Token prices, bound from Abacus:Llm:Pricing:<model>. Absent by default: a host that has
+        // not been told its rates reports cost as unknown rather than as zero.
+        services.TryAddSingleton<IModelPricing>(_ => new ModelPricing(
+            configuration?.GetSection("Abacus:Llm:Pricing").GetChildren().ToDictionary(
+                section => section.Key,
+                section => new ModelPrice(
+                    section.GetValue<decimal>("InputPerMillion"),
+                    section.GetValue<decimal>("OutputPerMillion")),
+                StringComparer.OrdinalIgnoreCase)));
+
         // Runtime
         services.TryAddSingleton<IWorkflowRegistry>(sp =>
-            new WorkflowRegistry(sp.GetServices<IWorkflowDefinition>()));
+        {
+            var registry = new WorkflowRegistry(sp.GetServices<IWorkflowDefinition>());
+
+            // A workflow declaring a notification name it could never legally emit should fail
+            // startup, not surprise someone in production.
+            foreach (WorkflowDescriptor descriptor in registry.All)
+            {
+                if (descriptor.Definition is INotifyingWorkflow notifying)
+                {
+                    notifying.Notifications.Validate(descriptor.Name);
+                }
+            }
+
+            return registry;
+        });
         services.TryAddSingleton<IWorkflowInspector>(sp => new WorkflowInspector(sp));
         services.TryAddSingleton<IGateConfigurationService>(sp => new GateConfigurationService(
             sp.GetRequiredService<IWorkflowRegistry>(),

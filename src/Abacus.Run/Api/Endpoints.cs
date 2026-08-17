@@ -119,7 +119,19 @@ public static class Endpoints
                     {
                         version = v.Version,
                         contextType = v.ContextType.Name,
-                        resultType = v.ResultType.Name
+                        resultType = v.ResultType.Name,
+
+                        // What a subscriber may expect from this workflow beyond the framework's own
+                        // events — discoverable, the way node descriptors already advertise gates.
+                        notifications = v.Definition is INotifyingWorkflow notifying
+                            ? new
+                            {
+                                level = notifying.Notifications.Level.ToString(),
+                                emits = notifying.Notifications.Emits
+                                    .Select(e => NodeNotifier.CustomPrefix + e)
+                                    .ToArray()
+                            }
+                            : null
                     })
                 });
         });

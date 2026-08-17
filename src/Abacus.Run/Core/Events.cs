@@ -113,7 +113,14 @@ public sealed class EventPublisher : IEventSink, IAsyncDisposable
                     continue;
                 }
 
-                await _store.AppendBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+                // Transient events reach live subscribers only. Storing a token that has already
+                // been rendered is write amplification for data nobody can use twice.
+                EventEnvelope[] durable = [.. batch.Where(e => !e.Transient)];
+                if (durable.Length > 0)
+                {
+                    await _store.AppendBatchAsync(durable, cancellationToken).ConfigureAwait(false);
+                }
+
                 if (_bus is not null)
                 {
                     await _bus.PublishBatchAsync(batch, cancellationToken).ConfigureAwait(false);
@@ -161,7 +168,12 @@ public sealed class DirectEventSink : IEventSink
         ArgumentNullException.ThrowIfNull(envelope);
         EventEnvelope redacted = envelope with { PayloadJson = _redaction.RedactBody(envelope.PayloadJson) };
         EventEnvelope[] batch = [redacted];
-        await _store.AppendBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+
+        if (!redacted.Transient)
+        {
+            await _store.AppendBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+        }
+
         if (_bus is not null)
         {
             await _bus.PublishBatchAsync(batch, cancellationToken).ConfigureAwait(false);
