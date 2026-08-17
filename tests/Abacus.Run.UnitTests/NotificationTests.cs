@@ -158,13 +158,13 @@ public class NotificationPolicyTests
 
 public class NodeNotifierTests
 {
-    private static (NodeNotifier Notifier, InMemoryEventStore Store, EventSequencer Sequencer) Build(
+    private static (NodeNotifier Notifier, InMemoryEventStore Store, NotificationSequencer Sequencer) Build(
         NotificationPolicy? policy = null)
     {
         var store = new InMemoryEventStore();
-        var sequencer = new EventSequencer();
+        var sequencer = new NotificationSequencer();
         var notifier = new NodeNotifier(
-            "i1", "acme", "node-a", new DirectEventSink(store), sequencer,
+            "i1", "acme", "node-a", new DirectNotificationSink(store), sequencer,
             policy ?? NotificationPolicy.Default, () => 3, TimeProvider.System);
 
         return (notifier, store, sequencer);
@@ -224,13 +224,13 @@ public class NodeNotifierTests
     [Fact]
     public async Task Custom_events_draw_from_the_same_sequence_as_lifecycle_events()
     {
-        (NodeNotifier notifier, InMemoryEventStore store, EventSequencer sequencer) = Build();
-        var sink = new DirectEventSink(store);
+        (NodeNotifier notifier, InMemoryEventStore store, NotificationSequencer sequencer) = Build();
+        var sink = new DirectNotificationSink(store);
 
         // Interleave: a lifecycle publish, a notify, another lifecycle publish.
-        await sink.PublishAsync(EventFactory.Create("i1", sequencer.Next("i1"), "workflow.started", new { }), default);
+        await sink.PublishAsync(NotificationFactory.Create("i1", sequencer.Next("i1"), "workflow.started", new { }), default);
         await notifier.NotifyAsync("midway", new { }, default);
-        await sink.PublishAsync(EventFactory.Create("i1", sequencer.Next("i1"), "workflow.output", new { }), default);
+        await sink.PublishAsync(NotificationFactory.Create("i1", sequencer.Next("i1"), "workflow.output", new { }), default);
 
         long[] sequences = (await ReadAsync(store)).Select(e => e.Sequence).ToArray();
 
@@ -240,7 +240,7 @@ public class NodeNotifierTests
     [Fact]
     public async Task A_suppressed_event_consumes_no_sequence_number()
     {
-        (NodeNotifier notifier, InMemoryEventStore store, EventSequencer sequencer) =
+        (NodeNotifier notifier, InMemoryEventStore store, NotificationSequencer sequencer) =
             Build(new NotificationPolicy { Level = NotificationLevel.Minimal });
 
         await notifier.NotifyAsync("suppressed", new { }, default);
@@ -254,10 +254,10 @@ public class NodeNotifierTests
     public async Task A_log_only_workflow_still_writes_a_full_durable_record()
     {
         var store = new InMemoryEventStore();
-        using var bus = new Abacus.Run.Api.InMemoryEventBus();
-        var sequencer = new EventSequencer();
+        using var bus = new Abacus.Run.Notifications.InMemoryNotificationBus();
+        var sequencer = new NotificationSequencer();
         var notifier = new NodeNotifier(
-            "i1", null, "node-a", new DirectEventSink(store, bus), sequencer,
+            "i1", null, "node-a", new DirectNotificationSink(store, bus), sequencer,
             new NotificationPolicy { StreamEvents = false },
             () => 1, TimeProvider.System, "my-workflow");
 
@@ -300,10 +300,10 @@ public class NodeNotifierTests
     public async Task A_stream_only_event_reaches_the_bus_but_not_the_store()
     {
         var store = new InMemoryEventStore();
-        using var bus = new Abacus.Run.Api.InMemoryEventBus();
-        var sequencer = new EventSequencer();
+        using var bus = new Abacus.Run.Notifications.InMemoryNotificationBus();
+        var sequencer = new NotificationSequencer();
         var notifier = new NodeNotifier(
-            "i1", null, "node-a", new DirectEventSink(store, bus), sequencer,
+            "i1", null, "node-a", new DirectNotificationSink(store, bus), sequencer,
             NotificationPolicy.Default, () => 1, TimeProvider.System);
 
         var received = new List<EventEnvelope>();

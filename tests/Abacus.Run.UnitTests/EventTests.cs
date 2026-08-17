@@ -12,7 +12,7 @@ public class EventSequencerTests
     [Fact]
     public void Starts_at_one_and_increments()
     {
-        var sequencer = new EventSequencer();
+        var sequencer = new NotificationSequencer();
         sequencer.Next("i1").Should().Be(1);
         sequencer.Next("i1").Should().Be(2);
         sequencer.Next("i1").Should().Be(3);
@@ -21,7 +21,7 @@ public class EventSequencerTests
     [Fact]
     public void Sequences_are_isolated_per_instance()
     {
-        var sequencer = new EventSequencer();
+        var sequencer = new NotificationSequencer();
         sequencer.Next("a").Should().Be(1);
         sequencer.Next("b").Should().Be(1);
         sequencer.Next("a").Should().Be(2);
@@ -30,7 +30,7 @@ public class EventSequencerTests
     [Fact]
     public void Peek_does_not_advance()
     {
-        var sequencer = new EventSequencer();
+        var sequencer = new NotificationSequencer();
         sequencer.Next("i1");
         sequencer.Peek("i1").Should().Be(1);
         sequencer.Peek("i1").Should().Be(1);
@@ -38,12 +38,12 @@ public class EventSequencerTests
 
     [Fact]
     public void Peek_on_an_unknown_instance_is_zero()
-        => new EventSequencer().Peek("nope").Should().Be(0);
+        => new NotificationSequencer().Peek("nope").Should().Be(0);
 
     [Fact]
     public void Seed_continues_the_sequence_after_a_resume()
     {
-        var sequencer = new EventSequencer();
+        var sequencer = new NotificationSequencer();
         sequencer.Seed("i1", 42);
 
         sequencer.Next("i1").Should().Be(43, "a resumed instance must not restart its sequence at 1");
@@ -52,7 +52,7 @@ public class EventSequencerTests
     [Fact]
     public void Forget_resets_an_instance()
     {
-        var sequencer = new EventSequencer();
+        var sequencer = new NotificationSequencer();
         sequencer.Next("i1");
         sequencer.Forget("i1");
         sequencer.Next("i1").Should().Be(1);
@@ -61,7 +61,7 @@ public class EventSequencerTests
     [Fact]
     public async Task Is_gapless_under_parallel_increment()
     {
-        var sequencer = new EventSequencer();
+        var sequencer = new NotificationSequencer();
         const int count = 2000;
 
         long[] values = await Task.WhenAll(
@@ -77,7 +77,7 @@ public class EventFactoryTests
     [Fact]
     public void Create_serialises_the_payload_in_web_casing()
     {
-        EventEnvelope envelope = EventFactory.Create(
+        EventEnvelope envelope = NotificationFactory.Create(
             "i1", 5, WorkflowEventTypes.ExecutorInvoked, new { ExecutorId = "pay", Superstep = 2 }, "pay", 2, "t1");
 
         envelope.Sequence.Should().Be(5);
@@ -103,7 +103,7 @@ public class EventFactoryTests
             ExpiresAt = DateTimeOffset.UnixEpoch.AddHours(8)
         };
 
-        EventEnvelope envelope = EventFactory.ApprovalRequested(approval);
+        EventEnvelope envelope = NotificationFactory.ApprovalRequested(approval);
 
         envelope.EventType.Should().Be(WorkflowEventTypes.ApprovalRequested);
         envelope.ExecutorId.Should().Be("post-payment");
@@ -132,7 +132,7 @@ public class EventFactoryTests
             DecidedAt = DateTimeOffset.UnixEpoch
         };
 
-        EventEnvelope envelope = EventFactory.ApprovalDecided(approval, decision, ApprovalState.Approved);
+        EventEnvelope envelope = NotificationFactory.ApprovalDecided(approval, decision, ApprovalState.Approved);
 
         using JsonDocument doc = JsonDocument.Parse(envelope.PayloadJson);
         doc.RootElement.GetProperty("outcome").GetString().Should().Be("Approve");
@@ -149,7 +149,7 @@ public class EventFactoryTests
             Status = InstanceStatus.DeadStopped, CreatedAt = DateTimeOffset.UnixEpoch, UpdatedAt = DateTimeOffset.UnixEpoch
         };
 
-        EventEnvelope envelope = EventFactory.Terminated(instance, "FraudDetected");
+        EventEnvelope envelope = NotificationFactory.Terminated(instance, "FraudDetected");
 
         using JsonDocument doc = JsonDocument.Parse(envelope.PayloadJson);
         doc.RootElement.GetProperty("status").GetString().Should().Be("DeadStopped");
@@ -338,8 +338,8 @@ public class DirectEventSinkTests
     public async Task Writes_to_the_store_and_the_bus()
     {
         var store = new InMemoryEventStore();
-        var bus = new Abacus.Run.Api.InMemoryEventBus();
-        var sink = new DirectEventSink(store, bus);
+        var bus = new Abacus.Run.Notifications.InMemoryNotificationBus();
+        var sink = new DirectNotificationSink(store, bus);
 
         await sink.PublishAsync(TestFactory.Event("i1", 1, "e"), default);
 
@@ -351,7 +351,7 @@ public class DirectEventSinkTests
     {
         var store = new InMemoryEventStore();
         var policy = new RedactionPolicy(bodyAllowList: ["executorId"]);
-        var sink = new DirectEventSink(store, redaction: policy);
+        var sink = new DirectNotificationSink(store, redaction: policy);
 
         await sink.PublishAsync(
             TestFactory.Event("i1", 1, "e", payload: """{"executorId":"pay","ssn":"123-45-6789"}"""), default);
@@ -365,7 +365,7 @@ public class DirectEventSinkTests
     [Fact]
     public async Task Rejects_null_envelopes()
     {
-        var sink = new DirectEventSink(new InMemoryEventStore());
+        var sink = new DirectNotificationSink(new InMemoryEventStore());
         Func<Task> act = async () => await sink.PublishAsync(null!, default);
         await act.Should().ThrowAsync<ArgumentNullException>();
     }
@@ -377,7 +377,7 @@ public class EventPublisherTests
     public async Task Batches_events_to_the_store()
     {
         var store = new InMemoryEventStore();
-        await using var publisher = new EventPublisher(store, batchSize: 10);
+        await using var publisher = new NotificationPublisher(store, batchSize: 10);
 
         for (int i = 1; i <= 25; i++)
         {
@@ -393,8 +393,8 @@ public class EventPublisherTests
     public async Task Fans_out_to_the_bus_as_well_as_the_store()
     {
         var store = new InMemoryEventStore();
-        var bus = new Abacus.Run.Api.InMemoryEventBus();
-        await using var publisher = new EventPublisher(store, bus, batchSize: 5);
+        var bus = new Abacus.Run.Notifications.InMemoryNotificationBus();
+        await using var publisher = new NotificationPublisher(store, bus, batchSize: 5);
 
         await publisher.PublishAsync(TestFactory.Event("i1", 1, "e"), default);
 

@@ -5,23 +5,16 @@ using Abacus.Run.Abstractions;
 
 namespace Abacus.Run.Core;
 
-public interface IEventSink
+public interface INotificationSink
 {
     ValueTask PublishAsync(EventEnvelope envelope, CancellationToken cancellationToken);
-}
-
-public interface IEventBus
-{
-    ValueTask PublishBatchAsync(IReadOnlyList<EventEnvelope> events, CancellationToken cancellationToken);
-
-    IAsyncEnumerable<EventEnvelope> SubscribeAsync(string instanceId, CancellationToken cancellationToken);
 }
 
 /// <summary>
 /// Assigns gapless per-instance sequence numbers. The SSE <c>id:</c> and the stored sequence are the
 /// same value, which is what makes history-then-subscribe catch-up exact.
 /// </summary>
-public sealed class EventSequencer
+public sealed class NotificationSequencer
 {
     private readonly ConcurrentDictionary<string, StrongBox> _counters = new();
 
@@ -50,19 +43,19 @@ public sealed class EventSequencer
 /// Single write path for events: redact, persist durably, fan out to the bus. Bounded with wait —
 /// dropping events would break the gapless-sequence contract that catch-up depends on.
 /// </summary>
-public sealed class EventPublisher : IEventSink, IAsyncDisposable
+public sealed class NotificationPublisher : INotificationSink, IAsyncDisposable
 {
     private readonly IEventStore _store;
-    private readonly IEventBus? _bus;
+    private readonly INotificationBus? _bus;
     private readonly IRedactionPolicy _redaction;
     private readonly Channel<EventEnvelope> _channel;
     private readonly Task _drain;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly int _batchSize;
 
-    public EventPublisher(
+    public NotificationPublisher(
         IEventStore store,
-        IEventBus? bus = null,
+        INotificationBus? bus = null,
         IRedactionPolicy? redaction = null,
         int channelCapacity = 10_000,
         int batchSize = 200)
@@ -151,13 +144,13 @@ public sealed class EventPublisher : IEventSink, IAsyncDisposable
 }
 
 /// <summary>Synchronous sink used in tests and by callers that need write-through ordering.</summary>
-public sealed class DirectEventSink : IEventSink
+public sealed class DirectNotificationSink : INotificationSink
 {
     private readonly IEventStore _store;
-    private readonly IEventBus? _bus;
+    private readonly INotificationBus? _bus;
     private readonly IRedactionPolicy _redaction;
 
-    public DirectEventSink(IEventStore store, IEventBus? bus = null, IRedactionPolicy? redaction = null)
+    public DirectNotificationSink(IEventStore store, INotificationBus? bus = null, IRedactionPolicy? redaction = null)
     {
         _store = store;
         _bus = bus;
@@ -182,7 +175,7 @@ public sealed class DirectEventSink : IEventSink
     }
 }
 
-public static class EventFactory
+public static class NotificationFactory
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 

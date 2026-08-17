@@ -13,7 +13,10 @@ public sealed class AbacusServiceOptions
     /// <summary>When set, SQL Server replaces the framework's in-memory stores.</summary>
     public string? SqlServerConnectionString { get; set; }
 
-    /// <summary>When set, Redis Streams replaces the framework's in-process event bus.</summary>
+    /// <summary>
+    /// When set, Redis becomes the SSE backplane, so a subscriber can connect to any replica rather
+    /// than only the one running the instance. Cache only — it carries no domain messages.
+    /// </summary>
     public string? RedisConnectionString { get; set; }
 
     public bool EnsureDatabaseCreated { get; set; }
@@ -21,14 +24,8 @@ public sealed class AbacusServiceOptions
     public int RedisMaxStreamLength { get; set; } = 10_000;
 
     /// <summary>
-    /// Approximate retention for the cross-service broker stream. Larger than the per-instance event
-    /// streams because one stream carries every topic for the whole deployment.
-    /// </summary>
-    public int RedisMaxBrokerStreamLength { get; set; } = 100_000;
-
-    /// <summary>
-    /// When set, RabbitMQ carries the cross-service event broker instead of Redis Streams. Redis, if
-    /// also configured, still carries the SSE event bus — the two are separate concerns.
+    /// When set, RabbitMQ carries domain events between services. Unset leaves the framework's
+    /// in-process broker in place, which is correct for a single-service deployment.
     /// </summary>
     public string? RabbitMqConnectionString { get; set; }
 }
@@ -61,7 +58,6 @@ public static class AbacusServiceCollectionExtensions
             RedisConnectionString = configuration["Abacus:Redis:ConnectionString"],
             EnsureDatabaseCreated = configuration.GetValue("Abacus:SqlServer:EnsureDatabaseCreated", false),
             RedisMaxStreamLength = configuration.GetValue("Abacus:Redis:MaxStreamLength", 10_000),
-            RedisMaxBrokerStreamLength = configuration.GetValue("Abacus:Redis:MaxBrokerStreamLength", 100_000),
             RabbitMqConnectionString = configuration["Abacus:RabbitMq:ConnectionString"]
         };
         configure?.Invoke(options);
@@ -81,17 +77,19 @@ public static class AbacusServiceCollectionExtensions
             services.AddSqlServerStores(options.SqlServerConnectionString, options.EnsureDatabaseCreated);
         }
 
+        // Cache: the SSE backplane, so a subscriber can reach any replica. Unset leaves the
+        // framework's in-memory bus, which is correct for a single replica.
         if (!string.IsNullOrWhiteSpace(options.RedisConnectionString))
         {
-            services.AddRedisEventBus(options.RedisConnectionString, options.RedisMaxStreamLength);
-            services.AddRedisEventBroker(options.RedisConnectionString, options.RedisMaxBrokerStreamLength);
+            services.AddRedisCache(options.RedisConnectionString, options.RedisMaxStreamLength);
         }
 
-        // Registered after Redis on purpose: naming RabbitMQ explicitly is a choice of broker, and
-        // it replaces whatever came before. The Redis event bus, a separate concern, stays put.
+        // Messaging: domain events between services. Unset leaves the in-process broker, which is
+        // correct for a single service. The two are independent — a deployment may want either,
+        // both, or neither.
         if (!string.IsNullOrWhiteSpace(options.RabbitMqConnectionString))
         {
-            services.AddRabbitMqEventBroker(options.RabbitMqConnectionString);
+            services.AddRabbitMqDomainEventBroker(options.RabbitMqConnectionString);
         }
 
         return host;

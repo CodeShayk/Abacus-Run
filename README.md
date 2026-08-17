@@ -163,14 +163,14 @@ public static WorkflowHostBuilder AddAbacus(this IServiceCollection services, IC
 
     if (configuration["Abacus:Redis:ConnectionString"] is { Length: > 0 } redis)
     {
-        services.AddRedisEventBus(redis, maxStreamLength: 10_000);      // SSE fan-out across replicas
+        services.AddRedisNotificationBus(redis, maxStreamLength: 10_000);      // SSE fan-out across replicas
         services.AddRedisEventBroker(redis, maxStreamLength: 100_000);  // cross-service pub/sub
     }
 
     // Or RabbitMQ instead of the Redis broker — one or the other, not both.
     if (configuration["Abacus:RabbitMq:ConnectionString"] is { Length: > 0 } amqp)
     {
-        services.AddRabbitMqEventBroker(amqp);
+        services.AddRabbitMqDomainEventBroker(amqp);
     }
 
     return host;
@@ -388,14 +388,14 @@ because of it:
 
 ```csharp
 // Publish, as a side effect on the way past
-context.Node(new PublishEventExecutor<OrderPlaced>(
+context.Node(new PublishDomainEventExecutor<OrderPlaced>(
     "publish", broker, topic: "orders.placed", correlationKey: o => o.OrderId));
 
 // Start on a message
-public IReadOnlyList<EventTrigger> Triggers => [new EventTrigger { TopicFilter = "orders.placed" }];
+public IReadOnlyList<DomainEventTrigger> Triggers => [new DomainEventTrigger { TopicFilter = "orders.placed" }];
 
 // Or park mid-run until one arrives
-context.Node(new WaitForEventExecutor<PaymentContext, PaymentSettled>(
+context.Node(new WaitForDomainEventExecutor<PaymentContext, PaymentSettled>(
     "await-settlement", subscriptions, "payment.settled", correlationKey: c => c.OrderId));
 ```
 
@@ -406,15 +406,15 @@ days.
 
 Topic filters use `*` for one segment and `#` for the remainder. Scope travels on the message —
 `Local` by default, so the same publishing code is correct in one service and in a fleet.
-`InProcessEventBroker` is registered by default; `AddRedisEventBroker` or `AddRabbitMqEventBroker`
+`InProcessDomainEventBroker` is registered by default; `AddRedisEventBroker` or `AddRabbitMqDomainEventBroker`
 replaces it for cross-service pub/sub, and an impossible combination is rejected at composition time
 rather than failing silently in production.
 
 | Transport | Reach | Competing consumers | Replay | Dead letter |
 | --- | --- | --- | --- | --- |
-| `InProcessEventBroker` *(default)* | This service | Yes | No | No |
+| `InProcessDomainEventBroker` *(default)* | This service | Yes | No | No |
 | `RedisEventBroker` | Every service | Yes | Yes | Yes |
-| `RabbitMqEventBroker` | Every service | Yes | No | Yes |
+| `RabbitMqDomainEventBroker` | Every service | Yes | No | Yes |
 
 Redis filters client-side and can replay from a stream. RabbitMQ filters server-side at a topic
 exchange, so a subscriber is never woken for a message it would discard, and reports
@@ -573,7 +573,7 @@ src/Abacus.Run/               src/Abacus.Run.Service/
                                 AbacusServiceCollectionExtensions.cs
 
 src/Abacus.Adapters.Cache.Redis/     src/Abacus.Adapters.Messaging.RabbitMQ/
-  RedisEventBus.cs               RabbitMqEventBroker.cs
+  RedisNotificationBus.cs               RabbitMqDomainEventBroker.cs
   RedisEventBroker.cs            RabbitMqServiceCollectionExtensions.cs
   RedisServiceCollectionExtensions.cs
 ```

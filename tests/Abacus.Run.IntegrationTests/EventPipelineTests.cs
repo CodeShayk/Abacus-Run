@@ -3,7 +3,8 @@ using Abacus.Run.Abstractions;
 using Abacus.Run.Api;
 using Abacus.Run.Core;
 using Abacus.Run.Dispatch;
-using Abacus.Run.EventBus;
+using Abacus.Run.Messaging;
+using Abacus.Run.Notifications;
 using Abacus.Run.Executors;
 using Abacus.Run.Persistence;
 using FluentAssertions;
@@ -37,10 +38,10 @@ public sealed class PlaceOrderWorkflow : IWorkflowDefinition<PlaceOrderContext, 
 
     public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken cancellationToken)
     {
-        var broker = context.Services!.GetRequiredService<IEventBroker>();
+        var broker = context.Services!.GetRequiredService<IDomainEventBroker>();
 
         ExecutorBinding prepare = context.Node(new Prepare("prepare"));
-        ExecutorBinding publish = context.Node(new PublishEventExecutor<OrderPlaced>(
+        ExecutorBinding publish = context.Node(new PublishDomainEventExecutor<OrderPlaced>(
             "publish-order-placed", broker, "orders.placed", correlationKey: o => o.OrderId));
 
         return new ValueTask<Workflow>(new WorkflowBuilder(prepare)
@@ -59,7 +60,7 @@ public sealed class PlaceOrderWorkflow : IWorkflowDefinition<PlaceOrderContext, 
 }
 
 /// <summary>Started by a message rather than by an API call.</summary>
-public sealed class ShipOrderWorkflow : IWorkflowDefinition<OrderPlaced, ShipmentResult>, IEventTriggeredWorkflow
+public sealed class ShipOrderWorkflow : IWorkflowDefinition<OrderPlaced, ShipmentResult>, IDomainEventTriggeredWorkflow
 {
     private readonly SideEffectLedger _ledger;
 
@@ -68,8 +69,8 @@ public sealed class ShipOrderWorkflow : IWorkflowDefinition<OrderPlaced, Shipmen
     public string Name => "ship-order";
     public string Version => "1.0.0";
 
-    public IReadOnlyList<EventTrigger> Triggers =>
-        [new EventTrigger { TopicFilter = "orders.placed" }];
+    public IReadOnlyList<DomainEventTrigger> Triggers =>
+        [new DomainEventTrigger { TopicFilter = "orders.placed" }];
 
     public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken cancellationToken)
     {
@@ -101,10 +102,10 @@ public sealed class AwaitPaymentWorkflow : IWorkflowDefinition<AwaitPaymentConte
 
     public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken cancellationToken)
     {
-        var subscriptions = context.Services!.GetRequiredService<IEventSubscriptionStore>();
+        var subscriptions = context.Services!.GetRequiredService<IDomainEventSubscriptionStore>();
 
         ExecutorBinding begin = context.Node(new Begin("begin"));
-        ExecutorBinding wait = context.Node(new WaitForEventExecutor<AwaitPaymentContext, PaymentSettled>(
+        ExecutorBinding wait = context.Node(new WaitForDomainEventExecutor<AwaitPaymentContext, PaymentSettled>(
             "await-settlement", subscriptions, "payment.settled", correlationKey: c => c.OrderId));
         ExecutorBinding finish = context.Node(new Finish("finish"));
 
@@ -240,7 +241,7 @@ public class EventPipelineTests : IClassFixture<EventPipelineFixture>
     public async Task A_workflow_parks_on_an_event_and_resumes_with_its_payload()
     {
         var launcher = _fixture.Resolve<IInstanceLauncher>();
-        var broker = _fixture.Resolve<IEventBroker>();
+        var broker = _fixture.Resolve<IDomainEventBroker>();
 
         StartResult started = await launcher.StartAsync(
             "await-payment", null,
@@ -254,7 +255,7 @@ public class EventPipelineTests : IClassFixture<EventPipelineFixture>
             "a wait must release its lease rather than block an execution slot");
 
         // Nothing is holding this in memory: the wait is a row, and so is the instance.
-        await broker.PublishAsync(new BrokerMessage
+        await broker.PublishAsync(new DomainEventMessage
         {
             MessageId = IdGenerator.NewId("msg"),
             Topic = "payment.settled",
@@ -273,7 +274,7 @@ public class EventPipelineTests : IClassFixture<EventPipelineFixture>
     public async Task An_event_for_a_different_correlation_key_does_not_resume_the_wait()
     {
         var launcher = _fixture.Resolve<IInstanceLauncher>();
-        var broker = _fixture.Resolve<IEventBroker>();
+        var broker = _fixture.Resolve<IDomainEventBroker>();
 
         StartResult started = await launcher.StartAsync(
             "await-payment", null,
@@ -282,7 +283,7 @@ public class EventPipelineTests : IClassFixture<EventPipelineFixture>
 
         await _fixture.WaitForStatusAsync(started.Instance!.InstanceId, InstanceStatus.AwaitingInput);
 
-        await broker.PublishAsync(new BrokerMessage
+        await broker.PublishAsync(new DomainEventMessage
         {
             MessageId = IdGenerator.NewId("msg"),
             Topic = "payment.settled",
@@ -448,10 +449,10 @@ public class EventPipelineDurabilityTests
     {
         // Stores are the only thing that survives; everything else is rebuilt below.
         var instances = new InMemoryInstanceStore();
-        var subscriptions = new InMemoryEventSubscriptionStore();
+        var subscriptions = new InMemoryDomainEventSubscriptionStore();
         var events = new InMemoryEventStore();
-        var sequencer = new EventSequencer();
-        IEventSink sink = new DirectEventSink(events);
+        var sequencer = new NotificationSequencer();
+        INotificationSink sink = new DirectNotificationSink(events);
         IWorkflowRegistry registry = new WorkflowRegistry([new AwaitPaymentWorkflow()]);
 
         WorkflowInstance instance = await instances.CreateAsync(new CreateInstanceRequest
@@ -465,10 +466,10 @@ public class EventPipelineDurabilityTests
 
         await instances.UpdateAsync(instance.InstanceId, m => m.Status = InstanceStatus.AwaitingInput, default);
 
-        await subscriptions.RegisterAsync(new EventSubscription
+        await subscriptions.RegisterAsync(new DomainEventSubscription
         {
             SubscriptionId = IdGenerator.NewId("sub"),
-            Kind = SubscriptionKind.Wait,
+            Kind = DomainSubscriptionKind.Wait,
             TopicFilter = "payment.settled",
             CorrelationKey = "ORD-RESTART",
             InstanceId = instance.InstanceId,
@@ -477,16 +478,16 @@ public class EventPipelineDurabilityTests
 
         // --- the process dies here; a completely fresh broker and router come up ---
 
-        await using var broker = new InProcessEventBroker();
-        var dispatch = new BrokerDispatchService(
+        await using var broker = new InProcessDomainEventBroker();
+        var dispatch = new DomainEventDispatcher(
             broker, subscriptions,
             new InstanceLauncher(registry, instances),
             instances, registry, sink, sequencer,
-            NullLogger<BrokerDispatchService>.Instance);
+            NullLogger<DomainEventDispatcher>.Instance);
 
-        await dispatch.HandleAsync(new EventDelivery
+        await dispatch.HandleAsync(new DomainEventDelivery
         {
-            Message = new BrokerMessage
+            Message = new DomainEventMessage
             {
                 MessageId = IdGenerator.NewId("msg"),
                 Topic = "payment.settled",
@@ -501,7 +502,7 @@ public class EventPipelineDurabilityTests
         resumed!.Status.Should().Be(InstanceStatus.Dispatchable,
             "the wait was a durable row, so a restarted process can still resolve it");
 
-        EventSubscription? wait = await subscriptions
+        DomainEventSubscription? wait = await subscriptions
             .FindWaitAsync(instance.InstanceId, "await-settlement", default);
 
         wait!.DeliveredPayloadJson.Should().Contain("99");
@@ -511,28 +512,28 @@ public class EventPipelineDurabilityTests
     public async Task A_redelivered_trigger_message_does_not_start_a_second_instance()
     {
         var instances = new InMemoryInstanceStore();
-        var subscriptions = new InMemoryEventSubscriptionStore();
-        var sequencer = new EventSequencer();
-        IEventSink sink = new DirectEventSink(new InMemoryEventStore());
+        var subscriptions = new InMemoryDomainEventSubscriptionStore();
+        var sequencer = new NotificationSequencer();
+        INotificationSink sink = new DirectNotificationSink(new InMemoryEventStore());
         IWorkflowRegistry registry = new WorkflowRegistry([new ShipOrderWorkflow(new SideEffectLedger())]);
 
-        await using var broker = new InProcessEventBroker();
-        var dispatch = new BrokerDispatchService(
+        await using var broker = new InProcessDomainEventBroker();
+        var dispatch = new DomainEventDispatcher(
             broker, subscriptions,
             new InstanceLauncher(registry, instances),
             instances, registry, sink, sequencer,
-            NullLogger<BrokerDispatchService>.Instance);
+            NullLogger<DomainEventDispatcher>.Instance);
 
         await dispatch.LoadTriggersAsync(default);
 
-        var message = new BrokerMessage
+        var message = new DomainEventMessage
         {
             MessageId = IdGenerator.NewId("msg"),
             Topic = "orders.placed",
             PayloadJson = """{"orderId":"ORD-DUP"}"""
         };
 
-        var delivery = new EventDelivery { Message = message, SubscriptionId = "transport" };
+        var delivery = new DomainEventDelivery { Message = message, SubscriptionId = "transport" };
 
         await dispatch.HandleAsync(delivery, default);
         await dispatch.HandleAsync(delivery, default);   // at-least-once: the transport redelivers
@@ -549,16 +550,16 @@ public class EventPipelineDurabilityTests
         var instances = new InMemoryInstanceStore();
         IWorkflowRegistry registry = new WorkflowRegistry([]);
 
-        await using var broker = new InProcessEventBroker();
-        var dispatch = new BrokerDispatchService(
-            broker, new InMemoryEventSubscriptionStore(),
+        await using var broker = new InProcessDomainEventBroker();
+        var dispatch = new DomainEventDispatcher(
+            broker, new InMemoryDomainEventSubscriptionStore(),
             new InstanceLauncher(registry, instances),
-            instances, registry, new DirectEventSink(new InMemoryEventStore()), new EventSequencer(),
-            NullLogger<BrokerDispatchService>.Instance);
+            instances, registry, new DirectNotificationSink(new InMemoryEventStore()), new NotificationSequencer(),
+            NullLogger<DomainEventDispatcher>.Instance);
 
-        DeliveryResult result = await dispatch.HandleAsync(new EventDelivery
+        DeliveryResult result = await dispatch.HandleAsync(new DomainEventDelivery
         {
-            Message = new BrokerMessage
+            Message = new DomainEventMessage
             {
                 MessageId = IdGenerator.NewId("msg"),
                 Topic = "nobody.listening",

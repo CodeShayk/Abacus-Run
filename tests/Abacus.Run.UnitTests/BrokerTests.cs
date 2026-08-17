@@ -1,6 +1,7 @@
 using Abacus.Run.Abstractions;
 using Abacus.Run.Core;
-using Abacus.Run.EventBus;
+using Abacus.Run.Messaging;
+using Abacus.Run.Notifications;
 using Abacus.Run.Persistence;
 using FluentAssertions;
 using Xunit;
@@ -68,7 +69,7 @@ public class TopicPatternTests
 
 public class InProcessEventBrokerTests
 {
-    private static BrokerMessage Message(string topic, string? correlationKey = null, string? tenantId = null)
+    private static DomainEventMessage Message(string topic, string? correlationKey = null, string? tenantId = null)
         => new()
         {
             MessageId = IdGenerator.NewId("msg"),
@@ -78,10 +79,10 @@ public class InProcessEventBrokerTests
             TenantId = tenantId
         };
 
-    private static async Task<IReadOnlyList<BrokerMessage>> CollectAsync(
-        InProcessEventBroker broker, EventSubscriptionOptions options, Func<Task> act, int expected)
+    private static async Task<IReadOnlyList<DomainEventMessage>> CollectAsync(
+        InProcessDomainEventBroker broker, DomainEventSubscriptionOptions options, Func<Task> act, int expected)
     {
-        var received = new List<BrokerMessage>();
+        var received = new List<DomainEventMessage>();
         var signal = new SemaphoreSlim(0);
 
         await using IAsyncDisposable handle = await broker.SubscribeAsync(options, (delivery, _) =>
@@ -110,11 +111,11 @@ public class InProcessEventBrokerTests
     [Fact]
     public async Task Delivers_a_matching_message()
     {
-        await using var broker = new InProcessEventBroker();
+        await using var broker = new InProcessDomainEventBroker();
 
-        IReadOnlyList<BrokerMessage> received = await CollectAsync(
+        IReadOnlyList<DomainEventMessage> received = await CollectAsync(
             broker,
-            new EventSubscriptionOptions { TopicFilter = "orders.#" },
+            new DomainEventSubscriptionOptions { TopicFilter = "orders.#" },
             () => broker.PublishAsync(Message("orders.placed"), CancellationToken.None).AsTask(),
             expected: 1);
 
@@ -124,11 +125,11 @@ public class InProcessEventBrokerTests
     [Fact]
     public async Task Does_not_deliver_a_non_matching_topic()
     {
-        await using var broker = new InProcessEventBroker();
-        var received = new List<BrokerMessage>();
+        await using var broker = new InProcessDomainEventBroker();
+        var received = new List<DomainEventMessage>();
 
         await using IAsyncDisposable handle = await broker.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "orders.#" },
+            new DomainEventSubscriptionOptions { TopicFilter = "orders.#" },
             (delivery, _) =>
             {
                 lock (received) { received.Add(delivery.Message); }
@@ -144,11 +145,11 @@ public class InProcessEventBrokerTests
     [Fact]
     public async Task Filters_by_tenant_so_a_subscriber_never_sees_another_tenants_message()
     {
-        await using var broker = new InProcessEventBroker();
-        var received = new List<BrokerMessage>();
+        await using var broker = new InProcessDomainEventBroker();
+        var received = new List<DomainEventMessage>();
 
         await using IAsyncDisposable handle = await broker.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "#", TenantId = "acme" },
+            new DomainEventSubscriptionOptions { TopicFilter = "#", TenantId = "acme" },
             (delivery, _) =>
             {
                 lock (received) { received.Add(delivery.Message); }
@@ -164,11 +165,11 @@ public class InProcessEventBrokerTests
     [Fact]
     public async Task Filters_by_correlation_key()
     {
-        await using var broker = new InProcessEventBroker();
+        await using var broker = new InProcessDomainEventBroker();
 
-        IReadOnlyList<BrokerMessage> received = await CollectAsync(
+        IReadOnlyList<DomainEventMessage> received = await CollectAsync(
             broker,
-            new EventSubscriptionOptions { TopicFilter = "#", CorrelationKey = "ORD-1" },
+            new DomainEventSubscriptionOptions { TopicFilter = "#", CorrelationKey = "ORD-1" },
             async () =>
             {
                 await broker.PublishAsync(Message("orders.placed", correlationKey: "ORD-2"), CancellationToken.None);
@@ -182,18 +183,18 @@ public class InProcessEventBrokerTests
     [Fact]
     public async Task Every_matching_subscription_receives_its_own_copy()
     {
-        await using var broker = new InProcessEventBroker();
+        await using var broker = new InProcessDomainEventBroker();
         var first = new List<string>();
         var second = new List<string>();
         var signal = new SemaphoreSlim(0);
 
         await using IAsyncDisposable a = await broker.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "orders.#" },
+            new DomainEventSubscriptionOptions { TopicFilter = "orders.#" },
             (d, _) => { lock (first) { first.Add(d.Message.MessageId); } signal.Release(); return ValueTask.FromResult(DeliveryResult.Ack); },
             CancellationToken.None);
 
         await using IAsyncDisposable b = await broker.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "#" },
+            new DomainEventSubscriptionOptions { TopicFilter = "#" },
             (d, _) => { lock (second) { second.Add(d.Message.MessageId); } signal.Release(); return ValueTask.FromResult(DeliveryResult.Ack); },
             CancellationToken.None);
 
@@ -209,13 +210,13 @@ public class InProcessEventBrokerTests
     [Fact]
     public async Task A_throwing_handler_does_not_kill_the_subscription()
     {
-        await using var broker = new InProcessEventBroker();
+        await using var broker = new InProcessDomainEventBroker();
         var received = new List<string>();
         var signal = new SemaphoreSlim(0);
         bool thrown = false;
 
         await using IAsyncDisposable handle = await broker.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "#" },
+            new DomainEventSubscriptionOptions { TopicFilter = "#" },
             (d, _) =>
             {
                 if (!thrown)
@@ -241,11 +242,11 @@ public class InProcessEventBrokerTests
     [Fact]
     public async Task Unsubscribing_stops_delivery()
     {
-        await using var broker = new InProcessEventBroker();
+        await using var broker = new InProcessDomainEventBroker();
         var received = new List<string>();
 
         IAsyncDisposable handle = await broker.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "#" },
+            new DomainEventSubscriptionOptions { TopicFilter = "#" },
             (d, _) => { lock (received) { received.Add(d.Message.MessageId); } return ValueTask.FromResult(DeliveryResult.Ack); },
             CancellationToken.None);
 
@@ -261,9 +262,9 @@ public class InProcessEventBrokerTests
     [Fact]
     public async Task Refuses_to_publish_a_distributed_message_rather_than_pretending()
     {
-        await using var broker = new InProcessEventBroker();
+        await using var broker = new InProcessDomainEventBroker();
 
-        BrokerMessage message = Message("orders.placed") with { Scope = DeliveryScope.Distributed };
+        DomainEventMessage message = Message("orders.placed") with { Scope = DeliveryScope.Distributed };
 
         Func<Task> publish = () => broker.PublishAsync(message, CancellationToken.None).AsTask();
 
@@ -274,10 +275,10 @@ public class InProcessEventBrokerTests
     [Fact]
     public async Task Refuses_a_distributed_subscription()
     {
-        await using var broker = new InProcessEventBroker();
+        await using var broker = new InProcessDomainEventBroker();
 
         Func<Task> subscribe = () => broker.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "#", Scope = DeliveryScope.Distributed },
+            new DomainEventSubscriptionOptions { TopicFilter = "#", Scope = DeliveryScope.Distributed },
             (_, _) => ValueTask.FromResult(DeliveryResult.Ack),
             CancellationToken.None).AsTask();
 
@@ -287,10 +288,10 @@ public class InProcessEventBrokerTests
     [Fact]
     public async Task Rejects_a_malformed_topic_filter_at_subscribe_time()
     {
-        await using var broker = new InProcessEventBroker();
+        await using var broker = new InProcessDomainEventBroker();
 
         Func<Task> subscribe = () => broker.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "orders.#.shipped" },
+            new DomainEventSubscriptionOptions { TopicFilter = "orders.#.shipped" },
             (_, _) => ValueTask.FromResult(DeliveryResult.Ack),
             CancellationToken.None).AsTask();
 
@@ -300,7 +301,7 @@ public class InProcessEventBrokerTests
     [Fact]
     public async Task Reports_in_process_capabilities()
     {
-        await using var broker = new InProcessEventBroker();
+        await using var broker = new InProcessDomainEventBroker();
         broker.Capabilities.SupportsDistributed.Should().BeFalse();
         broker.Capabilities.SupportsReplay.Should().BeFalse();
     }
@@ -308,7 +309,7 @@ public class InProcessEventBrokerTests
 
 public class EventSubscriptionStoreTests
 {
-    private static BrokerMessage Message(string topic, string? correlationKey = null, string? tenantId = null)
+    private static DomainEventMessage Message(string topic, string? correlationKey = null, string? tenantId = null)
         => new()
         {
             MessageId = IdGenerator.NewId("msg"),
@@ -318,12 +319,12 @@ public class EventSubscriptionStoreTests
             TenantId = tenantId
         };
 
-    private static EventSubscription Wait(string topicFilter, string instanceId = "i1", string executorId = "wait",
+    private static DomainEventSubscription Wait(string topicFilter, string instanceId = "i1", string executorId = "wait",
         string? correlationKey = null, DateTimeOffset? expiresAt = null)
         => new()
         {
             SubscriptionId = IdGenerator.NewId("sub"),
-            Kind = SubscriptionKind.Wait,
+            Kind = DomainSubscriptionKind.Wait,
             TopicFilter = topicFilter,
             InstanceId = instanceId,
             ExecutorId = executorId,
@@ -334,8 +335,8 @@ public class EventSubscriptionStoreTests
     [Fact]
     public async Task Matches_on_topic_tenant_and_correlation()
     {
-        var store = new InMemoryEventSubscriptionStore();
-        EventSubscription registered = await store.RegisterAsync(
+        var store = new InMemoryDomainEventSubscriptionStore();
+        DomainEventSubscription registered = await store.RegisterAsync(
             Wait("orders.#", correlationKey: "ORD-1") with { TenantId = "acme" }, default);
 
         (await store.MatchAsync(Message("orders.placed", "ORD-1", "acme"), default))
@@ -349,7 +350,7 @@ public class EventSubscriptionStoreTests
     [Fact]
     public async Task A_subscription_without_a_tenant_sees_every_tenant()
     {
-        var store = new InMemoryEventSubscriptionStore();
+        var store = new InMemoryDomainEventSubscriptionStore();
         await store.RegisterAsync(Wait("orders.#"), default);
 
         (await store.MatchAsync(Message("orders.placed", tenantId: "acme"), default)).Should().HaveCount(1);
@@ -358,9 +359,9 @@ public class EventSubscriptionStoreTests
     [Fact]
     public async Task Only_one_caller_wins_a_delivery()
     {
-        var store = new InMemoryEventSubscriptionStore();
-        EventSubscription subscription = await store.RegisterAsync(Wait("orders.#"), default);
-        BrokerMessage message = Message("orders.placed");
+        var store = new InMemoryDomainEventSubscriptionStore();
+        DomainEventSubscription subscription = await store.RegisterAsync(Wait("orders.#"), default);
+        DomainEventMessage message = Message("orders.placed");
 
         bool[] results = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ =>
             Task.Run(async () => await store.TryDeliverAsync(subscription.SubscriptionId, message, default))));
@@ -372,8 +373,8 @@ public class EventSubscriptionStoreTests
     [Fact]
     public async Task A_delivered_wait_stops_matching()
     {
-        var store = new InMemoryEventSubscriptionStore();
-        EventSubscription subscription = await store.RegisterAsync(Wait("orders.#"), default);
+        var store = new InMemoryDomainEventSubscriptionStore();
+        DomainEventSubscription subscription = await store.RegisterAsync(Wait("orders.#"), default);
 
         await store.TryDeliverAsync(subscription.SubscriptionId, Message("orders.placed"), default);
 
@@ -383,12 +384,12 @@ public class EventSubscriptionStoreTests
     [Fact]
     public async Task Re_registering_the_same_wait_preserves_a_recorded_delivery()
     {
-        var store = new InMemoryEventSubscriptionStore();
-        EventSubscription first = await store.RegisterAsync(Wait("orders.#"), default);
+        var store = new InMemoryDomainEventSubscriptionStore();
+        DomainEventSubscription first = await store.RegisterAsync(Wait("orders.#"), default);
         await store.TryDeliverAsync(first.SubscriptionId, Message("orders.placed"), default);
 
         // A resumed instance replays its executor, which re-registers. It must find its payload.
-        EventSubscription second = await store.RegisterAsync(Wait("orders.#"), default);
+        DomainEventSubscription second = await store.RegisterAsync(Wait("orders.#"), default);
 
         second.SubscriptionId.Should().Be(first.SubscriptionId);
         second.DeliveredPayloadJson.Should().NotBeNull();
@@ -397,7 +398,7 @@ public class EventSubscriptionStoreTests
     [Fact]
     public async Task Claims_expired_waits_once()
     {
-        var store = new InMemoryEventSubscriptionStore();
+        var store = new InMemoryDomainEventSubscriptionStore();
         DateTimeOffset now = DateTimeOffset.UtcNow;
         await store.RegisterAsync(Wait("orders.#", expiresAt: now.AddMinutes(-1)), default);
 
@@ -409,7 +410,7 @@ public class EventSubscriptionStoreTests
     [Fact]
     public async Task Does_not_claim_a_wait_that_has_not_expired()
     {
-        var store = new InMemoryEventSubscriptionStore();
+        var store = new InMemoryDomainEventSubscriptionStore();
         DateTimeOffset now = DateTimeOffset.UtcNow;
         await store.RegisterAsync(Wait("orders.#", expiresAt: now.AddMinutes(5)), default);
 
@@ -419,26 +420,26 @@ public class EventSubscriptionStoreTests
     [Fact]
     public async Task Removes_every_wait_belonging_to_an_instance()
     {
-        var store = new InMemoryEventSubscriptionStore();
+        var store = new InMemoryDomainEventSubscriptionStore();
         await store.RegisterAsync(Wait("orders.#", "i1", "a"), default);
         await store.RegisterAsync(Wait("orders.#", "i1", "b"), default);
         await store.RegisterAsync(Wait("orders.#", "i2", "a"), default);
 
         await store.RemoveForInstanceAsync("i1", default);
 
-        (await store.QueryAsync(new SubscriptionQuery(), default)).Should().ContainSingle()
+        (await store.QueryAsync(new DomainSubscriptionQuery(), default)).Should().ContainSingle()
             .Which.InstanceId.Should().Be("i2");
     }
 
     [Fact]
     public async Task A_wait_must_name_its_instance_and_executor()
     {
-        var store = new InMemoryEventSubscriptionStore();
+        var store = new InMemoryDomainEventSubscriptionStore();
 
-        Func<Task> register = () => store.RegisterAsync(new EventSubscription
+        Func<Task> register = () => store.RegisterAsync(new DomainEventSubscription
         {
             SubscriptionId = "s1",
-            Kind = SubscriptionKind.Wait,
+            Kind = DomainSubscriptionKind.Wait,
             TopicFilter = "orders.#"
         }, default).AsTask();
 
@@ -448,7 +449,7 @@ public class EventSubscriptionStoreTests
     [Fact]
     public async Task Scope_narrows_matching()
     {
-        var store = new InMemoryEventSubscriptionStore();
+        var store = new InMemoryDomainEventSubscriptionStore();
         await store.RegisterAsync(Wait("orders.#") with { Scope = DeliveryScope.Distributed }, default);
 
         (await store.MatchAsync(Message("orders.placed"), default)).Should()

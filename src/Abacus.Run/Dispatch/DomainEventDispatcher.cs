@@ -23,30 +23,30 @@ namespace Abacus.Run.Dispatch;
 /// The transport only makes that transition fast. It is never what makes it happen.
 /// </para>
 /// </remarks>
-public sealed class BrokerDispatchService : BackgroundService
+public sealed class DomainEventDispatcher : BackgroundService
 {
-    private readonly IEventBroker _broker;
-    private readonly IEventSubscriptionStore _subscriptions;
+    private readonly IDomainEventBroker _broker;
+    private readonly IDomainEventSubscriptionStore _subscriptions;
     private readonly IInstanceLauncher _launcher;
     private readonly IInstanceStore _instances;
     private readonly IWorkflowRegistry _registry;
-    private readonly IEventSink _events;
-    private readonly EventSequencer _sequencer;
-    private readonly ILogger<BrokerDispatchService> _logger;
+    private readonly INotificationSink _events;
+    private readonly NotificationSequencer _sequencer;
+    private readonly ILogger<DomainEventDispatcher> _logger;
     private readonly TimeProvider _clock;
 
     private IAsyncDisposable? _subscription;
     private long _unrouted;
 
-    public BrokerDispatchService(
-        IEventBroker broker,
-        IEventSubscriptionStore subscriptions,
+    public DomainEventDispatcher(
+        IDomainEventBroker broker,
+        IDomainEventSubscriptionStore subscriptions,
         IInstanceLauncher launcher,
         IInstanceStore instances,
         IWorkflowRegistry registry,
-        IEventSink events,
-        EventSequencer sequencer,
-        ILogger<BrokerDispatchService> logger,
+        INotificationSink events,
+        NotificationSequencer sequencer,
+        ILogger<DomainEventDispatcher> logger,
         TimeProvider? clock = null)
     {
         _broker = broker;
@@ -71,7 +71,7 @@ public sealed class BrokerDispatchService : BackgroundService
         await LoadTriggersAsync(stoppingToken).ConfigureAwait(false);
 
         _subscription = await _broker.SubscribeAsync(
-            new EventSubscriptionOptions
+            new DomainEventSubscriptionOptions
             {
                 TopicFilter = "#",
                 Name = "abacus.broker-dispatch",
@@ -105,12 +105,12 @@ public sealed class BrokerDispatchService : BackgroundService
     {
         foreach (WorkflowDescriptor descriptor in _registry.All)
         {
-            if (descriptor.Definition is not IEventTriggeredWorkflow triggered)
+            if (descriptor.Definition is not IDomainEventTriggeredWorkflow triggered)
             {
                 continue;
             }
 
-            foreach (EventTrigger trigger in triggered.Triggers)
+            foreach (DomainEventTrigger trigger in triggered.Triggers)
             {
                 if (!TopicPattern.IsValidPattern(trigger.TopicFilter, out string? error))
                 {
@@ -119,10 +119,10 @@ public sealed class BrokerDispatchService : BackgroundService
                         $"Workflow '{descriptor.Name}' declares an invalid event trigger. {error}");
                 }
 
-                await _subscriptions.RegisterAsync(new EventSubscription
+                await _subscriptions.RegisterAsync(new DomainEventSubscription
                 {
                     SubscriptionId = $"trigger:{descriptor.Name}:{descriptor.Version}:{trigger.TopicFilter}",
-                    Kind = SubscriptionKind.Trigger,
+                    Kind = DomainSubscriptionKind.Trigger,
                     TopicFilter = trigger.TopicFilter,
                     CorrelationKey = trigger.CorrelationKey,
                     WorkflowName = descriptor.Name,
@@ -137,13 +137,13 @@ public sealed class BrokerDispatchService : BackgroundService
     }
 
     /// <summary>Routes one message. Public so tests can drive it without a running host.</summary>
-    public async ValueTask<DeliveryResult> HandleAsync(EventDelivery delivery, CancellationToken cancellationToken)
+    public async ValueTask<DeliveryResult> HandleAsync(DomainEventDelivery delivery, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(delivery);
 
-        BrokerMessage message = delivery.Message;
+        DomainEventMessage message = delivery.Message;
 
-        IReadOnlyList<EventSubscription> matches =
+        IReadOnlyList<DomainEventSubscription> matches =
             await _subscriptions.MatchAsync(message, cancellationToken).ConfigureAwait(false);
 
         if (matches.Count == 0)
@@ -156,17 +156,17 @@ public sealed class BrokerDispatchService : BackgroundService
 
         var failures = new List<string>();
 
-        foreach (EventSubscription subscription in matches)
+        foreach (DomainEventSubscription subscription in matches)
         {
             try
             {
                 switch (subscription.Kind)
                 {
-                    case SubscriptionKind.Trigger:
+                    case DomainSubscriptionKind.Trigger:
                         await TriggerAsync(subscription, message, cancellationToken).ConfigureAwait(false);
                         break;
 
-                    case SubscriptionKind.Wait:
+                    case DomainSubscriptionKind.Wait:
                         await ResumeAsync(subscription, message, cancellationToken).ConfigureAwait(false);
                         break;
                 }
@@ -187,14 +187,14 @@ public sealed class BrokerDispatchService : BackgroundService
     }
 
     private async Task TriggerAsync(
-        EventSubscription subscription, BrokerMessage message, CancellationToken cancellationToken)
+        DomainEventSubscription subscription, DomainEventMessage message, CancellationToken cancellationToken)
     {
         string contextJson = message.PayloadJson;
 
         if (_registry.Resolve(subscription.WorkflowName!, subscription.WorkflowVersion) is { } descriptor &&
-            descriptor.Definition is IEventTriggeredWorkflow triggered)
+            descriptor.Definition is IDomainEventTriggeredWorkflow triggered)
         {
-            EventTrigger? declared = triggered.Triggers.FirstOrDefault(t =>
+            DomainEventTrigger? declared = triggered.Triggers.FirstOrDefault(t =>
                 string.Equals(t.TopicFilter, subscription.TopicFilter, StringComparison.Ordinal));
 
             if (declared?.ContextSelector is { } selector)
@@ -222,7 +222,7 @@ public sealed class BrokerDispatchService : BackgroundService
         switch (result.Kind)
         {
             case StartResultKind.Accepted when result.Instance is { } instance:
-                await EmitAsync(instance.InstanceId, instance.TenantId, BrokerEventTypes.EventTriggered, new
+                await EmitAsync(instance.InstanceId, instance.TenantId, DomainEventNotifications.EventTriggered, new
                 {
                     topic = message.Topic,
                     messageId = message.MessageId,
@@ -259,7 +259,7 @@ public sealed class BrokerDispatchService : BackgroundService
     }
 
     private async Task ResumeAsync(
-        EventSubscription subscription, BrokerMessage message, CancellationToken cancellationToken)
+        DomainEventSubscription subscription, DomainEventMessage message, CancellationToken cancellationToken)
     {
         bool won = await _subscriptions
             .TryDeliverAsync(subscription.SubscriptionId, message, cancellationToken).ConfigureAwait(false);
@@ -281,7 +281,7 @@ public sealed class BrokerDispatchService : BackgroundService
             return;
         }
 
-        await EmitAsync(instanceId, instance.TenantId, BrokerEventTypes.EventDelivered, new
+        await EmitAsync(instanceId, instance.TenantId, DomainEventNotifications.EventDelivered, new
         {
             topic = message.Topic,
             messageId = message.MessageId,
@@ -306,29 +306,29 @@ public sealed class BrokerDispatchService : BackgroundService
     private ValueTask EmitAsync(
         string instanceId, string? tenantId, string eventType, object payload, CancellationToken cancellationToken)
         => _events.PublishAsync(
-            EventFactory.Create(
+            NotificationFactory.Create(
                 instanceId, _sequencer.Next(instanceId), eventType, payload,
                 tenantId: tenantId, at: _clock.GetUtcNow()),
             cancellationToken);
 }
 
 /// <summary>Applies wait-expiry policy on a fixed cadence, mirroring approval expiry.</summary>
-public sealed class EventWaitSweeperService : BackgroundService
+public sealed class DomainEventWaitSweeper : BackgroundService
 {
-    private readonly IEventSubscriptionStore _subscriptions;
+    private readonly IDomainEventSubscriptionStore _subscriptions;
     private readonly IInstanceStore _instances;
-    private readonly IEventSink _events;
-    private readonly EventSequencer _sequencer;
-    private readonly ILogger<EventWaitSweeperService> _logger;
+    private readonly INotificationSink _events;
+    private readonly NotificationSequencer _sequencer;
+    private readonly ILogger<DomainEventWaitSweeper> _logger;
     private readonly TimeProvider _clock;
     private readonly TimeSpan _interval;
 
-    public EventWaitSweeperService(
-        IEventSubscriptionStore subscriptions,
+    public DomainEventWaitSweeper(
+        IDomainEventSubscriptionStore subscriptions,
         IInstanceStore instances,
-        IEventSink events,
-        EventSequencer sequencer,
-        ILogger<EventWaitSweeperService> logger,
+        INotificationSink events,
+        NotificationSequencer sequencer,
+        ILogger<DomainEventWaitSweeper> logger,
         TimeProvider? clock = null,
         TimeSpan? interval = null)
     {
@@ -368,10 +368,10 @@ public sealed class EventWaitSweeperService : BackgroundService
     /// <summary>One sweep. Public so tests can drive it deterministically.</summary>
     public async Task<int> SweepAsync(CancellationToken cancellationToken)
     {
-        IReadOnlyList<EventSubscription> expired = await _subscriptions
+        IReadOnlyList<DomainEventSubscription> expired = await _subscriptions
             .ClaimExpiredAsync(_clock.GetUtcNow(), 100, cancellationToken).ConfigureAwait(false);
 
-        foreach (EventSubscription subscription in expired)
+        foreach (DomainEventSubscription subscription in expired)
         {
             string instanceId = subscription.InstanceId!;
             WorkflowInstance? instance = await _instances.GetAsync(instanceId, cancellationToken).ConfigureAwait(false);
@@ -382,8 +382,8 @@ public sealed class EventWaitSweeperService : BackgroundService
             }
 
             await _events.PublishAsync(
-                EventFactory.Create(
-                    instanceId, _sequencer.Next(instanceId), BrokerEventTypes.EventWaitExpired, new
+                NotificationFactory.Create(
+                    instanceId, _sequencer.Next(instanceId), DomainEventNotifications.EventWaitExpired, new
                     {
                         topic = subscription.TopicFilter,
                         executorId = subscription.ExecutorId,

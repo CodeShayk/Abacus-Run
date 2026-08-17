@@ -51,8 +51,8 @@ public sealed class InstanceControlService : IInstanceControl
 {
     private readonly IInstanceStore _instances;
     private readonly IApprovalStore _approvals;
-    private readonly IEventSink _events;
-    private readonly EventSequencer _sequencer;
+    private readonly INotificationSink _events;
+    private readonly NotificationSequencer _sequencer;
     private readonly IAuditStore _audit;
     private readonly IWorkflowRegistry _registry;
     private readonly ICheckpointDescriber? _checkpoints;
@@ -61,8 +61,8 @@ public sealed class InstanceControlService : IInstanceControl
     public InstanceControlService(
         IInstanceStore instances,
         IApprovalStore approvals,
-        IEventSink events,
-        EventSequencer sequencer,
+        INotificationSink events,
+        NotificationSequencer sequencer,
         IAuditStore audit,
         IWorkflowRegistry registry,
         ICheckpointDescriber? checkpoints = null,
@@ -311,7 +311,7 @@ public sealed class InstanceControlService : IInstanceControl
 
     private ValueTask EmitAsync(WorkflowInstance instance, string eventType, object payload, CancellationToken cancellationToken)
         => _events.PublishAsync(
-            EventFactory.Create(
+            NotificationFactory.Create(
                 instance.InstanceId, _sequencer.Next(instance.InstanceId), eventType, payload,
                 tenantId: instance.TenantId, at: _clock.GetUtcNow()),
             cancellationToken);

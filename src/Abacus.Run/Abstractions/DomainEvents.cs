@@ -12,7 +12,7 @@ namespace Abacus.Run.Abstractions;
 /// Scope travels on the message rather than being fixed by the call site or by whichever transport
 /// happens to be registered, so the same publishing code is correct in a single-service deployment
 /// and in a fleet. A transport that cannot honour the scope it is handed fails loudly rather than
-/// delivering locally and looking like it worked; see <see cref="BrokerCapabilities"/>.
+/// delivering locally and looking like it worked; see <see cref="DomainEventBrokerCapabilities"/>.
 /// </para>
 /// </remarks>
 public enum DeliveryScope
@@ -26,7 +26,7 @@ public enum DeliveryScope
 
     /// <summary>
     /// Crosses the service boundary, for pub/sub between separately deployed services. Requires a
-    /// transport with <see cref="BrokerCapabilities.SupportsDistributed"/>.
+    /// transport with <see cref="DomainEventBrokerCapabilities.SupportsDistributed"/>.
     /// </summary>
     Distributed
 }
@@ -47,9 +47,9 @@ public enum DeliveryOutcome
 /// <summary>
 /// A domain message on a topic. Distinct from <c>EventEnvelope</c>, which is per-instance progress
 /// reporting for the SSE stream: an envelope answers "what is this instance doing", a
-/// <see cref="BrokerMessage"/> answers "what happened in the domain".
+/// <see cref="DomainEventMessage"/> answers "what happened in the domain".
 /// </summary>
-public sealed record BrokerMessage
+public sealed record DomainEventMessage
 {
     /// <summary>
     /// Stable identity for the message, used as the deduplication key by subscribers.
@@ -100,9 +100,9 @@ public sealed record BrokerMessage
 }
 
 /// <summary>One attempt to hand a message to one subscriber.</summary>
-public sealed record EventDelivery
+public sealed record DomainEventDelivery
 {
-    public required BrokerMessage Message { get; init; }
+    public required DomainEventMessage Message { get; init; }
 
     /// <summary>The subscription this delivery belongs to. Distinguishes fan-out copies of one message.</summary>
     public required string SubscriptionId { get; init; }
@@ -149,13 +149,13 @@ public enum SubscriptionStart
     Now,
 
     /// <summary>
-    /// Everything the transport still retains. Requires <see cref="BrokerCapabilities.SupportsReplay"/>.
+    /// Everything the transport still retains. Requires <see cref="DomainEventBrokerCapabilities.SupportsReplay"/>.
     /// </summary>
     Earliest
 }
 
 /// <summary>Declares what a subscriber wants to receive and how it wants to receive it.</summary>
-public sealed record EventSubscriptionOptions
+public sealed record DomainEventSubscriptionOptions
 {
     /// <summary>
     /// Topic pattern: literal segments, <c>*</c> for exactly one segment, <c>#</c> for the trailing
@@ -206,11 +206,11 @@ public sealed record EventSubscriptionOptions
 /// the message is delivered to local subscribers and simply never reaches the other service.
 /// Surfacing capability as data lets composition reject that at startup rather than in production.
 /// </remarks>
-public sealed record BrokerCapabilities
+public sealed record DomainEventBrokerCapabilities
 {
     public required bool SupportsDistributed { get; init; }
 
-    /// <summary>Whether <see cref="EventSubscriptionOptions.ConsumerGroup"/> is honoured.</summary>
+    /// <summary>Whether <see cref="DomainEventSubscriptionOptions.ConsumerGroup"/> is honoured.</summary>
     public required bool SupportsCompetingConsumers { get; init; }
 
     /// <summary>Whether <see cref="SubscriptionStart.Earliest"/> is honoured.</summary>
@@ -226,7 +226,7 @@ public sealed record BrokerCapabilities
     /// The default single-service transport: local delivery only, no replay, no dead letter.
     /// Competing consumers are supported because that is just routing within one process.
     /// </summary>
-    public static BrokerCapabilities InProcess { get; } = new()
+    public static DomainEventBrokerCapabilities InProcess { get; } = new()
     {
         SupportsDistributed = false,
         SupportsCompetingConsumers = true,
@@ -236,19 +236,19 @@ public sealed record BrokerCapabilities
 }
 
 /// <summary>Publishes domain messages. Separated from subscription so a component can hold only the half it uses.</summary>
-public interface IEventPublisher
+public interface IDomainEventPublisher
 {
-    ValueTask PublishAsync(BrokerMessage message, CancellationToken cancellationToken);
+    ValueTask PublishAsync(DomainEventMessage message, CancellationToken cancellationToken);
 
     /// <summary>
     /// Publishes a batch as one transport round-trip where the transport allows it. Not atomic:
-    /// partial success is possible, which is why <see cref="BrokerMessage.MessageId"/> exists.
+    /// partial success is possible, which is why <see cref="DomainEventMessage.MessageId"/> exists.
     /// </summary>
-    ValueTask PublishBatchAsync(IReadOnlyList<BrokerMessage> messages, CancellationToken cancellationToken);
+    ValueTask PublishBatchAsync(IReadOnlyList<DomainEventMessage> messages, CancellationToken cancellationToken);
 }
 
 /// <summary>Subscribes to domain messages.</summary>
-public interface IEventSubscriber
+public interface IDomainEventSubscriber
 {
     /// <summary>
     /// Registers <paramref name="handler"/> and returns a handle that unsubscribes when disposed.
@@ -259,11 +259,11 @@ public interface IEventSubscriber
     /// handler's <see cref="DeliveryResult"/> is what drives ack, redelivery, and dead-lettering.
     /// </remarks>
     /// <exception cref="NotSupportedException">
-    /// The options ask for something <see cref="IEventBroker.Capabilities"/> does not support.
+    /// The options ask for something <see cref="IDomainEventBroker.Capabilities"/> does not support.
     /// </exception>
     ValueTask<IAsyncDisposable> SubscribeAsync(
-        EventSubscriptionOptions options,
-        Func<EventDelivery, CancellationToken, ValueTask<DeliveryResult>> handler,
+        DomainEventSubscriptionOptions options,
+        Func<DomainEventDelivery, CancellationToken, ValueTask<DeliveryResult>> handler,
         CancellationToken cancellationToken);
 }
 
@@ -278,16 +278,16 @@ public interface IEventSubscriber
 /// between them is <see cref="Capabilities"/> and the <see cref="DeliveryScope"/> a publisher elects —
 /// never the author-facing call.
 /// </remarks>
-public interface IEventBroker : IEventPublisher, IEventSubscriber
+public interface IDomainEventBroker : IDomainEventPublisher, IDomainEventSubscriber
 {
-    BrokerCapabilities Capabilities { get; }
+    DomainEventBrokerCapabilities Capabilities { get; }
 }
 
 /// <summary>
 /// Declares that a message on <see cref="TopicFilter"/> starts a new instance of the workflow that
 /// owns this trigger.
 /// </summary>
-public sealed record EventTrigger
+public sealed record DomainEventTrigger
 {
     public required string TopicFilter { get; init; }
 
@@ -304,16 +304,16 @@ public sealed record EventTrigger
     /// Maps the message to the workflow's context. Null passes the payload through unchanged, which
     /// is correct when the workflow's context type is the published contract.
     /// </summary>
-    public Func<BrokerMessage, string>? ContextSelector { get; init; }
+    public Func<DomainEventMessage, string>? ContextSelector { get; init; }
 }
 
 /// <summary>
 /// Opt-in on a workflow definition: this workflow starts when a matching message is published.
 /// Opt-in rather than universal, so a workflow that is only ever started by API stays that way.
 /// </summary>
-public interface IEventTriggeredWorkflow
+public interface IDomainEventTriggeredWorkflow
 {
-    IReadOnlyList<EventTrigger> Triggers { get; }
+    IReadOnlyList<DomainEventTrigger> Triggers { get; }
 }
 
 /// <summary>

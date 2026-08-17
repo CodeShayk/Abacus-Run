@@ -1,3 +1,4 @@
+using Abacus.Run.Notifications;
 using Abacus.Run.Abstractions;
 using Abacus.Run.Api;
 using Abacus.Run.Core;
@@ -266,8 +267,8 @@ public class DispatcherServiceTests
         {
             Registry = new WorkflowRegistry([]),
             Instances = new InMemoryInstanceStore(),
-            Events = new DirectEventSink(new InMemoryEventStore()),
-            Sequencer = new EventSequencer(),
+            Events = new DirectNotificationSink(new InMemoryEventStore()),
+            Sequencer = new NotificationSequencer(),
             Pipelines = new MiddlewarePipelineFactory(),
             Checkpoints = new OverflowCheckpointStore()
         });
@@ -284,7 +285,7 @@ public class InMemoryEventBusTests
     [Fact]
     public async Task Subscribers_receive_published_events()
     {
-        using var bus = new InMemoryEventBus();
+        using var bus = new InMemoryNotificationBus();
         var received = new List<EventEnvelope>();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
@@ -311,7 +312,7 @@ public class InMemoryEventBusTests
     [Fact]
     public async Task Events_are_routed_only_to_the_matching_instance()
     {
-        using var bus = new InMemoryEventBus();
+        using var bus = new InMemoryNotificationBus();
         var received = new List<EventEnvelope>();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
@@ -338,7 +339,7 @@ public class InMemoryEventBusTests
     [Fact]
     public async Task Publishing_with_no_subscribers_is_a_no_op()
     {
-        using var bus = new InMemoryEventBus();
+        using var bus = new InMemoryNotificationBus();
         Func<Task> act = async () => await bus.PublishBatchAsync([TestFactory.Event("i1", 1, "a")], default);
         await act.Should().NotThrowAsync();
     }
@@ -346,7 +347,7 @@ public class InMemoryEventBusTests
     [Fact]
     public async Task Unsubscribing_removes_the_subscriber()
     {
-        using var bus = new InMemoryEventBus();
+        using var bus = new InMemoryNotificationBus();
         using var cts = new CancellationTokenSource();
 
         Task consumer = Task.Run(async () =>
@@ -370,11 +371,11 @@ public class InMemoryEventBusTests
     [Fact]
     public async Task Publish_rejects_null()
     {
-        using var bus = new InMemoryEventBus();
+        using var bus = new InMemoryNotificationBus();
         await bus.Invoking(b => b.PublishBatchAsync(null!, default).AsTask()).Should().ThrowAsync<ArgumentNullException>();
     }
 
-    private static async Task WaitForSubscriberAsync(InMemoryEventBus bus, string instanceId)
+    private static async Task WaitForSubscriberAsync(InMemoryNotificationBus bus, string instanceId)
     {
         for (int i = 0; i < 100 && bus.SubscriberCount(instanceId) == 0; i++)
         {

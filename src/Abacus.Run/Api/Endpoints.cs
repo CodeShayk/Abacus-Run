@@ -453,7 +453,7 @@ public static class Endpoints
                 from = parsed;
             }
 
-            var bus = services.GetService<IEventBus>();
+            var bus = services.GetService<INotificationBus>();
             await Sse.StreamAsync(http, id, from, instance.Status.IsTerminal(), store, bus, cancellationToken)
                 .ConfigureAwait(false);
 
@@ -591,7 +591,7 @@ public static class Endpoints
         app.MapPost("/events", async (
             PublishEventRequestDto body,
             HttpContext http,
-            IEventBroker broker,
+            IDomainEventBroker broker,
             CancellationToken cancellationToken) =>
         {
             if (body is null)
@@ -633,7 +633,7 @@ public static class Endpoints
                 ? key
                 : IdGenerator.NewId("msg");
 
-            var message = new BrokerMessage
+            var message = new DomainEventMessage
             {
                 MessageId = messageId,
                 Topic = body.Topic!,
@@ -710,17 +710,17 @@ public static class Endpoints
             [FromQuery] bool? pendingOnly,
             [FromQuery] int? limit,
             HttpContext http,
-            IEventSubscriptionStore subscriptions,
+            IDomainEventSubscriptionStore subscriptions,
             CancellationToken cancellationToken) =>
         {
-            SubscriptionKind? parsedKind = null;
+            DomainSubscriptionKind? parsedKind = null;
             if (kind is { Length: > 0 })
             {
-                if (!Enum.TryParse(kind, ignoreCase: true, out SubscriptionKind value))
+                if (!Enum.TryParse(kind, ignoreCase: true, out DomainSubscriptionKind value))
                 {
                     return Results.ValidationProblem(new Dictionary<string, string[]>
                     {
-                        ["kind"] = [$"Must be one of: {nameof(SubscriptionKind.Trigger)}, {nameof(SubscriptionKind.Wait)}."]
+                        ["kind"] = [$"Must be one of: {nameof(DomainSubscriptionKind.Trigger)}, {nameof(DomainSubscriptionKind.Wait)}."]
                     });
                 }
                 parsedKind = value;
@@ -731,7 +731,7 @@ public static class Endpoints
                 return Results.ValidationProblem(new Dictionary<string, string[]> { ["topic"] = [topicError!] });
             }
 
-            IReadOnlyList<EventSubscription> items = await subscriptions.QueryAsync(new SubscriptionQuery
+            IReadOnlyList<DomainEventSubscription> items = await subscriptions.QueryAsync(new DomainSubscriptionQuery
             {
                 InstanceId = instanceId,
                 Topic = topic,
@@ -857,7 +857,7 @@ public static class Endpoints
     /// The delivered payload is deliberately absent: it is domain data that has already been
     /// redacted on its way to the event stream, and repeating it unredacted here would undo that.
     /// </summary>
-    public static SubscriptionDto ToDto(this EventSubscription subscription) => new(
+    public static SubscriptionDto ToDto(this DomainEventSubscription subscription) => new(
         subscription.SubscriptionId, subscription.Kind.ToString(), subscription.TopicFilter,
         subscription.CorrelationKey, subscription.TenantId, subscription.InstanceId, subscription.ExecutorId,
         subscription.WorkflowName, subscription.IsSatisfied, subscription.ExpiresAt, subscription.CreatedAt);

@@ -4,10 +4,10 @@ using Abacus.Run.Abstractions;
 using Abacus.Run.Core;
 using Microsoft.Extensions.Logging;
 
-namespace Abacus.Run.EventBus;
+namespace Abacus.Run.Messaging;
 
 /// <summary>
-/// Single-service <see cref="IEventBroker"/>. The default: messages are handed to subscribers in this
+/// Single-service <see cref="IDomainEventBroker"/>. The default: messages are handed to subscribers in this
 /// process and go no further.
 /// </summary>
 /// <remarks>
@@ -22,36 +22,36 @@ namespace Abacus.Run.EventBus;
 /// other service simply never hears about it.
 /// </para>
 /// </remarks>
-public sealed class InProcessEventBroker : IEventBroker, IAsyncDisposable
+public sealed class InProcessDomainEventBroker : IDomainEventBroker, IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, Subscription> _subscriptions = new(StringComparer.Ordinal);
-    private readonly ILogger<InProcessEventBroker>? _logger;
+    private readonly ILogger<InProcessDomainEventBroker>? _logger;
     private readonly TimeProvider _clock;
     private volatile bool _disposed;
 
-    public InProcessEventBroker(ILogger<InProcessEventBroker>? logger = null, TimeProvider? clock = null)
+    public InProcessDomainEventBroker(ILogger<InProcessDomainEventBroker>? logger = null, TimeProvider? clock = null)
     {
         _logger = logger;
         _clock = clock ?? TimeProvider.System;
     }
 
-    public BrokerCapabilities Capabilities => BrokerCapabilities.InProcess;
+    public DomainEventBrokerCapabilities Capabilities => DomainEventBrokerCapabilities.InProcess;
 
     /// <summary>Test and diagnostic hook: how many subscriptions are currently registered.</summary>
     public int SubscriptionCount => _subscriptions.Count;
 
-    public ValueTask PublishAsync(BrokerMessage message, CancellationToken cancellationToken)
+    public ValueTask PublishAsync(DomainEventMessage message, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(message);
         return PublishBatchAsync([message], cancellationToken);
     }
 
-    public ValueTask PublishBatchAsync(IReadOnlyList<BrokerMessage> messages, CancellationToken cancellationToken)
+    public ValueTask PublishBatchAsync(IReadOnlyList<DomainEventMessage> messages, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(messages);
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        foreach (BrokerMessage message in messages)
+        foreach (DomainEventMessage message in messages)
         {
             cancellationToken.ThrowIfCancellationRequested();
             Validate(message);
@@ -78,8 +78,8 @@ public sealed class InProcessEventBroker : IEventBroker, IAsyncDisposable
     }
 
     public ValueTask<IAsyncDisposable> SubscribeAsync(
-        EventSubscriptionOptions options,
-        Func<EventDelivery, CancellationToken, ValueTask<DeliveryResult>> handler,
+        DomainEventSubscriptionOptions options,
+        Func<DomainEventDelivery, CancellationToken, ValueTask<DeliveryResult>> handler,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -92,13 +92,13 @@ public sealed class InProcessEventBroker : IEventBroker, IAsyncDisposable
         {
             throw new NotSupportedException(
                 $"Subscription '{options.Name ?? options.TopicFilter}' asks for distributed delivery, which " +
-                $"{nameof(InProcessEventBroker)} cannot provide. Register a distributed broker or drop the scope filter.");
+                $"{nameof(InProcessDomainEventBroker)} cannot provide. Register a distributed broker or drop the scope filter.");
         }
 
         if (options.Start == SubscriptionStart.Earliest)
         {
             throw new NotSupportedException(
-                $"{nameof(InProcessEventBroker)} retains nothing, so {nameof(SubscriptionStart.Earliest)} would " +
+                $"{nameof(InProcessDomainEventBroker)} retains nothing, so {nameof(SubscriptionStart.Earliest)} would " +
                 "silently behave as Now. Use a broker with replay support.");
         }
 
@@ -116,7 +116,7 @@ public sealed class InProcessEventBroker : IEventBroker, IAsyncDisposable
     /// exactly one can take it; that arbitration is the store's compare-and-set, not the transport's.
     /// The transport therefore filters only on what it can see: topic, scope, tenant, correlation.
     /// </summary>
-    private static bool SubscriptionMatches(EventSubscriptionOptions options, BrokerMessage message)
+    private static bool SubscriptionMatches(DomainEventSubscriptionOptions options, DomainEventMessage message)
     {
         if (options.Scope is { } scope && scope != message.Scope)
         {
@@ -138,7 +138,7 @@ public sealed class InProcessEventBroker : IEventBroker, IAsyncDisposable
         return TopicPattern.IsMatch(options.TopicFilter, message.Topic);
     }
 
-    private static void Validate(BrokerMessage message)
+    private static void Validate(DomainEventMessage message)
     {
         if (!TopicPattern.IsValidTopic(message.Topic, out string? error))
         {
@@ -149,7 +149,7 @@ public sealed class InProcessEventBroker : IEventBroker, IAsyncDisposable
         {
             throw new NotSupportedException(
                 $"Message '{message.MessageId}' on topic '{message.Topic}' is scoped " +
-                $"{nameof(DeliveryScope.Distributed)}, which {nameof(InProcessEventBroker)} cannot deliver. " +
+                $"{nameof(DeliveryScope.Distributed)}, which {nameof(InProcessDomainEventBroker)} cannot deliver. " +
                 "Register a distributed broker, or publish it as Local.");
         }
     }
@@ -173,7 +173,7 @@ public sealed class InProcessEventBroker : IEventBroker, IAsyncDisposable
 
     private sealed class Subscription : IAsyncDisposable
     {
-        private readonly Func<EventDelivery, CancellationToken, ValueTask<DeliveryResult>> _handler;
+        private readonly Func<DomainEventDelivery, CancellationToken, ValueTask<DeliveryResult>> _handler;
         private readonly ILogger? _logger;
         private readonly TimeProvider _clock;
         private readonly CancellationTokenSource _shutdown = new();
@@ -182,8 +182,8 @@ public sealed class InProcessEventBroker : IEventBroker, IAsyncDisposable
 
         public Subscription(
             string id,
-            EventSubscriptionOptions options,
-            Func<EventDelivery, CancellationToken, ValueTask<DeliveryResult>> handler,
+            DomainEventSubscriptionOptions options,
+            Func<DomainEventDelivery, CancellationToken, ValueTask<DeliveryResult>> handler,
             ILogger? logger,
             TimeProvider clock)
         {
@@ -192,13 +192,13 @@ public sealed class InProcessEventBroker : IEventBroker, IAsyncDisposable
             _handler = handler;
             _logger = logger;
             _clock = clock;
-            Channel = System.Threading.Channels.Channel.CreateUnbounded<BrokerMessage>(
+            Channel = System.Threading.Channels.Channel.CreateUnbounded<DomainEventMessage>(
                 new UnboundedChannelOptions { SingleReader = options.MaxConcurrency <= 1 });
         }
 
         public string Id { get; }
-        public EventSubscriptionOptions Options { get; }
-        public Channel<BrokerMessage> Channel { get; }
+        public DomainEventSubscriptionOptions Options { get; }
+        public Channel<DomainEventMessage> Channel { get; }
 
         public void Start(Action onDisposed)
         {
@@ -227,7 +227,7 @@ public sealed class InProcessEventBroker : IEventBroker, IAsyncDisposable
         {
             try
             {
-                await foreach (BrokerMessage message in
+                await foreach (DomainEventMessage message in
                     Channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
                 {
                     await HandleAsync(message, cancellationToken).ConfigureAwait(false);
@@ -239,9 +239,9 @@ public sealed class InProcessEventBroker : IEventBroker, IAsyncDisposable
             }
         }
 
-        private async Task HandleAsync(BrokerMessage message, CancellationToken cancellationToken)
+        private async Task HandleAsync(DomainEventMessage message, CancellationToken cancellationToken)
         {
-            var delivery = new EventDelivery
+            var delivery = new DomainEventDelivery
             {
                 Message = message,
                 SubscriptionId = Id,
@@ -255,7 +255,7 @@ public sealed class InProcessEventBroker : IEventBroker, IAsyncDisposable
 
                 // In-process delivery has nowhere to redeliver from and no dead-letter destination,
                 // so a non-Ack is a logged fact rather than a retry. A handler that needs redelivery
-                // needs a transport that retains, and BrokerCapabilities says which ones do.
+                // needs a transport that retains, and DomainEventBrokerCapabilities says which ones do.
                 if (result.Outcome != DeliveryOutcome.Ack)
                 {
                     _logger?.LogWarning(

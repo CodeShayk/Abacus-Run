@@ -21,7 +21,7 @@ public class WorkflowRunnerTests
     private readonly InMemoryEventStore _events = new();
     private readonly InMemoryApprovalStore _approvals = new();
     private readonly InMemoryLogStore _logs = new();
-    private readonly EventSequencer _sequencer = new();
+    private readonly NotificationSequencer _sequencer = new();
 
     public WorkflowRunnerTests() => _instances = new InMemoryInstanceStore(_clock);
 
@@ -34,7 +34,7 @@ public class WorkflowRunnerTests
         {
             Registry = new WorkflowRegistry([definition]),
             Instances = _instances,
-            Events = new DirectEventSink(_events),
+            Events = new DirectNotificationSink(_events),
             Sequencer = _sequencer,
             Pipelines = pipelines ?? new MiddlewarePipelineFactory(),
             Checkpoints = new OverflowCheckpointStore(clock: _clock),
@@ -255,7 +255,7 @@ public class WorkflowRunnerTests
     {
         var gated = new GatedWorkflow();
         var coordinator = new ApprovalCoordinator(
-            _approvals, _instances, new DirectEventSink(_events), _sequencer, null, _clock);
+            _approvals, _instances, new DirectNotificationSink(_events), _sequencer, null, _clock);
 
         WorkflowInstance instance = await SeedAsync("gated");
         RunOutcome outcome = await Build(gated, approvals: coordinator).RunAsync(instance, default);
@@ -273,7 +273,7 @@ public class WorkflowRunnerTests
     public async Task The_approval_request_arrives_on_the_same_event_stream_as_progress()
     {
         var coordinator = new ApprovalCoordinator(
-            _approvals, _instances, new DirectEventSink(_events), _sequencer, null, _clock);
+            _approvals, _instances, new DirectNotificationSink(_events), _sequencer, null, _clock);
 
         WorkflowInstance instance = await SeedAsync("gated");
         await Build(new GatedWorkflow(), approvals: coordinator).RunAsync(instance, default);
@@ -294,7 +294,7 @@ public class WorkflowRunnerTests
     {
         var gated = new GatedWorkflow();
         var coordinator = new ApprovalCoordinator(
-            _approvals, _instances, new DirectEventSink(_events), _sequencer, null, _clock);
+            _approvals, _instances, new DirectNotificationSink(_events), _sequencer, null, _clock);
 
         WorkflowInstance instance = await SeedAsync("gated");
         await Build(gated, approvals: coordinator).RunAsync(instance, default);
@@ -321,7 +321,7 @@ public class WorkflowRunnerTests
     public async Task A_rejected_gate_dead_stops_through_the_workflow_classifier()
     {
         var coordinator = new ApprovalCoordinator(
-            _approvals, _instances, new DirectEventSink(_events), _sequencer, null, _clock);
+            _approvals, _instances, new DirectNotificationSink(_events), _sequencer, null, _clock);
 
         WorkflowInstance instance = await SeedAsync("gated");
         await Build(new GatedWorkflow(), approvals: coordinator).RunAsync(instance, default);

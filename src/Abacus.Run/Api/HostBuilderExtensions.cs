@@ -3,7 +3,8 @@ using Abacus.Run.Abstractions;
 using Abacus.Run.Abstractions.Middleware;
 using Abacus.Run.Core;
 using Abacus.Run.Dispatch;
-using Abacus.Run.EventBus;
+using Abacus.Run.Messaging;
+using Abacus.Run.Notifications;
 using Abacus.Run.Middlewares;
 using Abacus.Run.Persistence;
 using Microsoft.Agents.AI.Workflows.Checkpointing;
@@ -77,9 +78,9 @@ public sealed class WorkflowHostBuilder
         Services.TryAddSingleton<LeaseManager>();
         Services.AddHostedService(sp => sp.GetRequiredService<DispatcherService>());
         Services.AddHostedService<ExpirySweeperService>();
-        Services.AddSingleton<BrokerDispatchService>();
-        Services.AddHostedService(sp => sp.GetRequiredService<BrokerDispatchService>());
-        Services.AddHostedService<EventWaitSweeperService>();
+        Services.AddSingleton<DomainEventDispatcher>();
+        Services.AddHostedService(sp => sp.GetRequiredService<DomainEventDispatcher>());
+        Services.AddHostedService<DomainEventWaitSweeper>();
         Services.AddHostedService<RetentionService>();
         Services.AddSingleton<DrainService>();
         Services.AddHostedService(sp => sp.GetRequiredService<DrainService>());
@@ -121,7 +122,7 @@ public static class HostBuilderExtensions
         services.TryAddSingleton<IAuditStore, InMemoryAuditStore>();
         services.TryAddSingleton<IAuditRecordStore, InMemoryAuditRecordStore>();
         services.TryAddSingleton<IBlobStore, InMemoryBlobStore>();
-        services.TryAddSingleton<IEventSubscriptionStore, InMemoryEventSubscriptionStore>();
+        services.TryAddSingleton<IDomainEventSubscriptionStore, InMemoryDomainEventSubscriptionStore>();
 
         services.TryAddSingleton(sp => new OverflowCheckpointStore(
             sp.GetRequiredService<IBlobStore>(),
@@ -131,20 +132,34 @@ public static class HostBuilderExtensions
         services.TryAddSingleton<ICheckpointDescriber, CheckpointDescriber>();
 
         // Events
-        services.TryAddSingleton<EventSequencer>();
+        services.TryAddSingleton<NotificationSequencer>();
         services.TryAddSingleton<IRedactionPolicy>(_ => RedactionPolicy.Default);
-        services.TryAddSingleton<IEventSink>(sp => new DirectEventSink(
+        services.TryAddSingleton<INotificationSink>(sp => new DirectNotificationSink(
             sp.GetRequiredService<IEventStore>(),
-            sp.GetService<IEventBus>(),
+            sp.GetService<INotificationBus>(),
             sp.GetRequiredService<IRedactionPolicy>()));
 
-        // The broker is a separate concern from IEventBus: that one fans instance progress out to
+        // Caching, as one substitution. The adapter supplies every cache-shaped capability — the
+        // general store and the SSE backplane — so registering Abacus.Adapters.Cache.Redis (or
+        // Memcached, or anything else) moves all of them together. In-memory by default, which is
+        // correct for a single replica and needs no infrastructure at all.
+        services.TryAddSingleton<InMemoryNotificationBus>();
+        services.TryAddSingleton<ICacheAdapter>(sp => new InMemoryCacheAdapter(
+            sp.GetRequiredService<InMemoryNotificationBus>(),
+            sp.GetRequiredService<TimeProvider>()));
+
+        // Both derive from the adapter rather than being registered independently, which is what
+        // stops a deployment caching in one technology while streaming through another.
+        services.TryAddSingleton<INotificationBus>(sp => sp.GetRequiredService<ICacheAdapter>().NotificationBackplane);
+        services.TryAddSingleton<ICacheStore>(sp => sp.GetRequiredService<ICacheAdapter>().Store);
+
+        // The broker is a separate concern from INotificationBus: that one fans instance progress out to
         // SSE, this one carries domain messages between workflows. Local delivery by default; a
         // distributed transport substitutes for cross-service pub/sub.
-        services.TryAddSingleton<InProcessEventBroker>(sp => new InProcessEventBroker(
-            sp.GetService<ILogger<InProcessEventBroker>>(),
+        services.TryAddSingleton<InProcessDomainEventBroker>(sp => new InProcessDomainEventBroker(
+            sp.GetService<ILogger<InProcessDomainEventBroker>>(),
             sp.GetRequiredService<TimeProvider>()));
-        services.TryAddSingleton<IEventBroker>(sp => sp.GetRequiredService<InProcessEventBroker>());
+        services.TryAddSingleton<IDomainEventBroker>(sp => sp.GetRequiredService<InProcessDomainEventBroker>());
 
         // Token prices, bound from Abacus:Llm:Pricing:<model>. Absent by default: a host that has
         // not been told its rates reports cost as unknown rather than as zero.
@@ -224,8 +239,8 @@ internal sealed class WorkflowRunnerFactory : IWorkflowRunnerFactory
     {
         Registry = _services.GetRequiredService<IWorkflowRegistry>(),
         Instances = _services.GetRequiredService<IInstanceStore>(),
-        Events = _services.GetRequiredService<IEventSink>(),
-        Sequencer = _services.GetRequiredService<EventSequencer>(),
+        Events = _services.GetRequiredService<INotificationSink>(),
+        Sequencer = _services.GetRequiredService<NotificationSequencer>(),
         Pipelines = _services.GetRequiredService<MiddlewarePipelineFactory>(),
         Checkpoints = _services.GetRequiredService<ICheckpointStore<JsonElement>>(),
         Approvals = _services.GetRequiredService<IApprovalStore>(),
@@ -233,7 +248,7 @@ internal sealed class WorkflowRunnerFactory : IWorkflowRunnerFactory
         GatePolicies = _services.GetRequiredService<IGatePolicyStore>(),
         Audit = _services.GetRequiredService<IAuditStore>(),
         AuditRecords = _services.GetRequiredService<IAuditRecordStore>(),
-        EventSubscriptions = _services.GetService<IEventSubscriptionStore>(),
+        EventSubscriptions = _services.GetService<IDomainEventSubscriptionStore>(),
         Logs = _services.GetRequiredService<ILogStore>(),
         Services = _services,
         Options = _services.GetRequiredService<IOptions<WorkflowHostOptions>>().Value,

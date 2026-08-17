@@ -15,23 +15,23 @@ public static class RabbitMqServiceCollectionExtensions
     /// <remarks>
     /// RabbitMQ filters by routing key at the exchange, so a subscriber is never woken for a message
     /// it would discard, and it dead-letters natively. It cannot replay — a queue holds only what
-    /// arrives after it is bound — and <see cref="BrokerCapabilities.SupportsReplay"/> reports that
+    /// arrives after it is bound — and <see cref="DomainEventBrokerCapabilities.SupportsReplay"/> reports that
     /// rather than pretending to a contract it cannot meet.
     /// </remarks>
     /// <param name="services">The service collection.</param>
     /// <param name="connectionString">AMQP URI, e.g. <c>amqp://guest:guest@localhost:5672</c>.</param>
-    public static IServiceCollection AddRabbitMqEventBroker(
+    public static IServiceCollection AddRabbitMqDomainEventBroker(
         this IServiceCollection services,
         string connectionString)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 
-        services.RemoveAll<IEventBroker>();
-        services.AddSingleton<IEventBroker>(sp =>
+        services.RemoveAll<IDomainEventBroker>();
+        services.AddSingleton<IDomainEventBroker>(sp =>
             // Blocking once at composition is deliberate: a broker that cannot connect should fail
             // startup, not surface later as a workflow that silently never triggers.
-            RabbitMqEventBroker.CreateAsync(connectionString, sp.GetService<ILoggerFactory>())
+            RabbitMqDomainEventBroker.CreateAsync(connectionString, sp.GetService<ILoggerFactory>())
                 .GetAwaiter().GetResult());
 
         return services;

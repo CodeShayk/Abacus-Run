@@ -3,7 +3,8 @@ using Abacus.Adapters.Messaging.RabbitMQ;
 using Abacus.Adapters.Cache.Redis;
 using Abacus.Run.Abstractions;
 using Abacus.Run.Api;
-using Abacus.Run.EventBus;
+using Abacus.Run.Messaging;
+using Abacus.Run.Notifications;
 using Abacus.Run.Service.ControlPlane;
 using Abacus.Run.Core;
 using Abacus.Run.Persistence;
@@ -23,8 +24,8 @@ public class ArchitectureBoundaryTests
 {
     private static readonly Assembly Library = typeof(WorkflowRunner).Assembly;
     private static readonly Assembly Host = typeof(AbacusServiceCollectionExtensions).Assembly;
-    private static readonly Assembly RedisAdapter = typeof(RedisEventBroker).Assembly;
-    private static readonly Assembly RabbitMqAdapter = typeof(RabbitMqEventBroker).Assembly;
+    private static readonly Assembly RedisAdapter = typeof(RedisNotificationBus).Assembly;
+    private static readonly Assembly RabbitMqAdapter = typeof(RabbitMqDomainEventBroker).Assembly;
 
     [Fact]
     public void The_library_and_the_host_are_separate_assemblies()
@@ -69,8 +70,8 @@ public class ArchitectureBoundaryTests
         typeof(InstanceControlService).Assembly.Should().BeSameAs(Library);
         typeof(InstanceLauncher).Assembly.Should().BeSameAs(Library);
         typeof(WorkflowHostBuilder).Assembly.Should().BeSameAs(Library);
-        typeof(InMemoryEventBus).Assembly.Should().BeSameAs(Library);
-        typeof(InProcessEventBroker).Assembly.Should().BeSameAs(Library);
+        typeof(InMemoryNotificationBus).Assembly.Should().BeSameAs(Library);
+        typeof(InProcessDomainEventBroker).Assembly.Should().BeSameAs(Library);
         typeof(InMemoryInstanceStore).Assembly.Should().BeSameAs(Library);
         typeof(OverflowCheckpointStore).Assembly.Should().BeSameAs(Library);
     }
@@ -88,22 +89,87 @@ public class ArchitectureBoundaryTests
     }
 
     [Fact]
-    public void Transports_live_in_their_own_adapter_assemblies()
+    public void Infrastructure_lives_in_its_own_adapter_assemblies()
     {
-        // Not in the host. A transport shipped inside a deployable is only reusable by copying it,
-        // and forces every consumer of that host to take its client library.
+        // Not in the host. Infrastructure shipped inside a deployable is only reusable by copying
+        // it, and forces every consumer of that host to take its client library.
         RedisAdapter.GetName().Name.Should().Be("Abacus.Adapters.Cache.Redis");
         RabbitMqAdapter.GetName().Name.Should().Be("Abacus.Adapters.Messaging.RabbitMQ");
 
-        typeof(RedisEventBus).Assembly.Should().BeSameAs(RedisAdapter);
-        typeof(RedisEventBroker).Assembly.Should().BeSameAs(RedisAdapter);
-        typeof(RedisControlChannel).Assembly.Should().BeSameAs(RedisAdapter);
-        typeof(RabbitMqEventBroker).Assembly.Should().BeSameAs(RabbitMqAdapter);
+        typeof(RedisNotificationBus).Assembly.Should().BeSameAs(RedisAdapter);
+        typeof(RabbitMqDomainEventBroker).Assembly.Should().BeSameAs(RabbitMqAdapter);
 
         Host.GetTypes().Select(t => t.Name).Should()
             .NotContain(n => n.StartsWith("Redis", StringComparison.Ordinal)
                           || n.StartsWith("RabbitMq", StringComparison.Ordinal),
-                "a transport left behind in the host would be the copy nobody updates");
+                "an adapter left behind in the host would be the copy nobody updates");
+    }
+
+    /// <summary>
+    /// The two adapter families answer different questions, and keeping them apart is what lets a
+    /// deployment take one without the other. Cache is the SSE backplane — how a subscriber reaches
+    /// a run it is watching. Messaging is domain events — how work reaches another service.
+    /// </summary>
+    [Fact]
+    public void A_cache_adapter_carries_no_domain_messaging()
+    {
+        Type[] cacheTypes = [.. RedisAdapter.GetTypes().Where(t => t is { IsClass: true, IsAbstract: false })];
+
+        cacheTypes.Should().Contain(t => typeof(INotificationBus).IsAssignableFrom(t),
+            "the cache adapter exists to be the SSE backplane");
+
+        cacheTypes.Should().NotContain(t => typeof(IDomainEventBroker).IsAssignableFrom(t),
+            "domain messaging belongs to an Abacus.Adapters.Messaging.* adapter, not to the cache");
+    }
+
+    /// <summary>
+    /// Every cache adapter supplies the whole cache surface. A future
+    /// <c>Abacus.Adapters.Cache.Memcached</c> satisfies this by implementing one interface, and
+    /// substituting it moves general caching and the SSE backplane in one step.
+    /// </summary>
+    [Fact]
+    public void A_cache_adapter_supplies_every_cache_capability()
+    {
+        Type[] adapters =
+        [
+            .. RedisAdapter.GetTypes().Where(t =>
+                t is { IsClass: true, IsAbstract: false } && typeof(ICacheAdapter).IsAssignableFrom(t))
+        ];
+
+        adapters.Should().ContainSingle(
+            "a cache adapter assembly offers one substitution point, not a menu of half-choices");
+
+        Type[] builtIn =
+        [
+            .. Library.GetTypes().Where(t =>
+                t is { IsClass: true, IsAbstract: false } && typeof(ICacheAdapter).IsAssignableFrom(t))
+        ];
+
+        builtIn.Should().NotBeEmpty(
+            "the framework ships an in-memory adapter so a host needs no cache infrastructure at all");
+    }
+
+    [Fact]
+    public void A_messaging_adapter_carries_no_cache()
+    {
+        Type[] messagingTypes = [.. RabbitMqAdapter.GetTypes().Where(t => t is { IsClass: true, IsAbstract: false })];
+
+        messagingTypes.Should().Contain(t => typeof(IDomainEventBroker).IsAssignableFrom(t),
+            "the messaging adapter exists to carry domain events");
+
+        messagingTypes.Should().NotContain(t => typeof(INotificationBus).IsAssignableFrom(t),
+            "the SSE backplane belongs to an Abacus.Adapters.Cache.* adapter");
+    }
+
+    /// <summary>
+    /// Both defaults ship with the framework, so a single-service deployment with no infrastructure
+    /// at all still streams SSE and still routes domain events.
+    /// </summary>
+    [Fact]
+    public void The_framework_defaults_need_no_adapter()
+    {
+        typeof(InMemoryNotificationBus).Assembly.Should().BeSameAs(Library);
+        typeof(InProcessDomainEventBroker).Assembly.Should().BeSameAs(Library);
     }
 
     [Theory]
@@ -151,8 +217,8 @@ public class ArchitectureBoundaryTests
         Type[] contracts =
         [
             typeof(IInstanceStore), typeof(IEventStore), typeof(ILogStore), typeof(IApprovalStore),
-            typeof(IGatePolicyStore), typeof(IAuditStore), typeof(IBlobStore), typeof(IEventBus),
-            typeof(IEventBroker), typeof(IEventSubscriptionStore)
+            typeof(IGatePolicyStore), typeof(IAuditStore), typeof(IBlobStore), typeof(INotificationBus),
+            typeof(IDomainEventBroker), typeof(IDomainEventSubscriptionStore)
         ];
 
         string[] adapters = Host.GetTypes()

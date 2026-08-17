@@ -130,10 +130,10 @@ public sealed class RabbitMqCollection : ICollectionFixture<RabbitMqFixture>
 /// <summary>Collects deliveries so a test can wait for an expected count rather than sleeping.</summary>
 public sealed class DeliveryRecorder
 {
-    private readonly List<BrokerMessage> _messages = [];
+    private readonly List<DomainEventMessage> _messages = [];
     private readonly SemaphoreSlim _signal = new(0);
 
-    public Func<EventDelivery, CancellationToken, ValueTask<DeliveryResult>> Handler => (delivery, _) =>
+    public Func<DomainEventDelivery, CancellationToken, ValueTask<DeliveryResult>> Handler => (delivery, _) =>
     {
         lock (_messages)
         {
@@ -144,7 +144,7 @@ public sealed class DeliveryRecorder
         return ValueTask.FromResult(DeliveryResult.Ack);
     };
 
-    public IReadOnlyList<BrokerMessage> Messages
+    public IReadOnlyList<DomainEventMessage> Messages
     {
         get { lock (_messages) { return [.. _messages]; } }
     }
@@ -185,7 +185,7 @@ public sealed class DeliveryRecorder
 
 public static class Msg
 {
-    public static BrokerMessage Distributed(
+    public static DomainEventMessage Distributed(
         string topic, string? correlationKey = null, string? tenantId = null, string payload = """{"v":1}""")
         => new()
         {
@@ -197,7 +197,7 @@ public static class Msg
             TenantId = tenantId
         };
 
-    public static BrokerMessage Local(string topic, string payload = """{"v":1}""")
+    public static DomainEventMessage Local(string topic, string payload = """{"v":1}""")
         => new()
         {
             MessageId = Abacus.Run.Core.IdGenerator.NewId("msg"),
