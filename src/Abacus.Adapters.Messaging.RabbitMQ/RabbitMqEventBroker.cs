@@ -1,18 +1,19 @@
 using System.Text;
 using System.Text.Json;
 using Abacus.Run.Abstractions;
+using Abacus.Run.EventBus;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
-namespace Abacus.Run.EventBus;
+namespace Abacus.Adapters.Messaging.RabbitMQ;
 
 /// <summary>
 /// Cross-service <see cref="IEventBroker"/> over RabbitMQ.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Like <see cref="RedisEventBroker"/>, this is the in-process broker <em>plus a wire</em>. A
+/// Like the Redis broker, this is the in-process broker <em>plus a wire</em>. A
 /// <see cref="DeliveryScope.Local"/> message never touches the network; a
 /// <see cref="DeliveryScope.Distributed"/> one goes to the exchange and comes back through each
 /// service's own queue, including the publisher's. Publishing does not also deliver locally, because

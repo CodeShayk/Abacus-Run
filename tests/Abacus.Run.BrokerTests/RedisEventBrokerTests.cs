@@ -1,5 +1,5 @@
 using Abacus.Run.Abstractions;
-using Abacus.Run.EventBus;
+using Abacus.Adapters.Cache.Redis;
 using FluentAssertions;
 using StackExchange.Redis;
 using Xunit;

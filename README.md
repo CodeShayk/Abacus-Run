@@ -205,7 +205,9 @@ app.Run();
 | Concern | Lives in |
 | --- | --- |
 | Runtime, dispatch, executors, middleware, HTTP API, in-memory defaults, in-process event broker | `Abacus.Run` |
-| Razor Pages, SQL Server stores, Redis event bus and broker, startup wiring | your service (`Abacus.Run.Service`) |
+| Redis Streams bus, Redis broker, control channel | `Abacus.Adapters.Cache.Redis` |
+| RabbitMQ topic-exchange broker | `Abacus.Adapters.Messaging.RabbitMQ` |
+| Razor Pages, SQL Server stores, startup wiring that selects the above | your service (`Abacus.Run.Service`) |
 
 The library carries no Razor, MVC, Entity Framework, or Redis dependency, and an architecture test in the integration suite fails the build if one drifts back in. Splitting a UI host out later is therefore a matter of moving Razor and infrastructure projects, not of untangling the runtime.
 
@@ -547,7 +549,9 @@ at startup.
 | Project | Responsibility |
 | --- | --- |
 | `src/Abacus.Run` | Headless framework: workflow runtime, dispatch, executors, middleware, in-memory store defaults, and HTTP API endpoints |
-| `src/Abacus.Run.Service` | Deployable host: control-plane UI, SQL Server stores, Redis event bus and event broker, the SQLite audit-record store, startup wiring, and the example workflow |
+| `src/Abacus.Adapters.Cache.Redis` | Redis adapters: Streams event bus, workflow event broker, cross-replica control channel |
+| `src/Abacus.Adapters.Messaging.RabbitMQ` | RabbitMQ adapter: topic-exchange workflow event broker |
+| `src/Abacus.Run.Service` | Deployable host: control-plane UI, SQL Server stores, the SQLite audit-record store, startup wiring, and the example workflow |
 | `tests/Abacus.Run.UnitTests` | Unit coverage for runtime behavior; references the library only |
 | `tests/Abacus.Run.IntegrationTests` | HTTP, control-plane, and architecture-boundary coverage against the real host |
 | `tests/Abacus.Run.ChaosTests` | Failure and lifecycle resilience coverage |
@@ -559,7 +563,7 @@ Folders inside each project:
 ```
 src/Abacus.Run/               src/Abacus.Run.Service/
   Abstractions/                 ControlPlane/      Razor Pages backing services
-  Api/                          Infrastructure/    SQL Server stores, Redis bus
+  Api/                          Infrastructure/    SQL Server stores
   Core/                           Auditing/        audit-record store and migrations
   Dispatch/                     Pages/             control-plane Razor Pages
   EventBus/                     Workflows/         workflow definitions hosted here
@@ -567,9 +571,18 @@ src/Abacus.Run/               src/Abacus.Run.Service/
   Middlewares/                  wwwroot/           control-plane CSS and JS
   Persistence/                  Program.cs
                                 AbacusServiceCollectionExtensions.cs
+
+src/Abacus.Adapters.Cache.Redis/     src/Abacus.Adapters.Messaging.RabbitMQ/
+  RedisEventBus.cs               RabbitMqEventBroker.cs
+  RedisEventBroker.cs            RabbitMqServiceCollectionExtensions.cs
+  RedisServiceCollectionExtensions.cs
 ```
 
-The library carries no Razor, MVC, Entity Framework, or Redis dependency; an architecture test in the integration suite enforces this. The same test keeps framework extension points — workflow definitions, host executors, middleware — out of the host shell, carving out only the `Abacus.Run.Service.Workflows.<Name>` namespaces where hosted workflows such as the example live.
+Each adapter references `Abacus.Run` and its own client library — nothing else. It does not reference
+the host, and the two adapters do not reference each other, so choosing one never drags in the
+other's dependency. Architecture tests in the integration suite enforce all three rules, along with
+the library carrying no Razor, MVC, Entity Framework, or transport dependency, and framework
+extension points staying out of the host shell.
 
 ## Test Coverage
 

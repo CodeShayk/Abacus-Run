@@ -54,7 +54,8 @@ This page is the repository-level technical wiki. It documents the implementatio
 | Middleware | Workflow-level and host-executor-level pipelines |
 | Audit records | A workflow declares the shape of its own audit record; the runtime hands every node a recorder and stores entries generically |
 | Library | `src/Abacus.Run` — headless framework: runtime, dispatch, executors, middleware, in-memory stores, HTTP API |
-| Service host | `src/Abacus.Run.Service` — control-plane UI, SQL Server stores, Redis event bus, startup wiring |
+| Transport adapters | `src/Abacus.Adapters.Cache.Redis` and `src/Abacus.Adapters.Messaging.RabbitMQ` — each implements the framework's transport contracts and depends on nothing but the framework and its own client |
+| Service host | `src/Abacus.Run.Service` — control-plane UI, SQL Server stores, startup wiring that selects the adapters |
 | Container | Multi-stage .NET 9 image listening on port 8080 |
 | Image publishing | GitHub Actions publishes `ghcr.io/codeshayk/abacus-run` |
 
@@ -163,7 +164,7 @@ Folders inside each project:
 ```
 src/Abacus.Run/               src/Abacus.Run.Service/
   Abstractions/                 ControlPlane/      Razor Pages backing services
-  Api/                          Infrastructure/    SQL Server stores, Redis bus
+  Api/                          Infrastructure/    SQL Server stores
   Core/                           Auditing/        audit-record store and migrations
   Dispatch/                     Pages/             control-plane Razor Pages
   EventBus/                     Workflows/         workflow definitions hosted here
@@ -171,14 +172,30 @@ src/Abacus.Run/               src/Abacus.Run.Service/
   Middlewares/                  wwwroot/           control-plane CSS and JS
   Persistence/                  Program.cs
                                 AbacusServiceCollectionExtensions.cs
+
+src/Abacus.Adapters.Cache.Redis/     src/Abacus.Adapters.Messaging.RabbitMQ/
+  RedisEventBus.cs               RabbitMqEventBroker.cs
+  RedisEventBroker.cs            RabbitMqServiceCollectionExtensions.cs
+  RedisServiceCollectionExtensions.cs
 ```
 
 ### Where the line falls
 
-The library is headless. It serves the API and nothing else, so it takes no dependency on Razor,
-MVC, Entity Framework, or Redis, and a consumer that references it gets a working host without
-inheriting a UI or a storage choice. The service supplies what is specific to one deployment: the
-operator UI, the concrete stores and bus, and the startup code that selects them.
+Three kinds of project, and the rule for each is different.
+
+The **library** is headless. It serves the API and nothing else, so it takes no dependency on Razor,
+MVC, Entity Framework, or any transport client, and a consumer that references it gets a working host
+without inheriting a UI or a storage choice.
+
+An **adapter** implements the framework's contracts over one technology. It references
+`Abacus.Run` and its own client library, and nothing else of ours. In particular it does not
+reference a host — a transport that did would be tied to one deployment and reusable only by copying
+it — and the adapters do not reference each other, so choosing Redis never drags in an AMQP client.
+
+The **service** supplies what is specific to one deployment: the operator UI, the concrete stores,
+and the startup code that selects an adapter. It references both adapters so an operator can switch
+transport by configuration rather than by rebuild; neither connects unless its connection string is
+set.
 
 `AddAbacus` reads as two steps for this reason — register the framework with its in-memory defaults,
 then displace those defaults when a connection string is configured. With neither

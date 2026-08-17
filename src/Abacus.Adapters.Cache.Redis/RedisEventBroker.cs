@@ -1,10 +1,11 @@
 using System.Text.Json;
 using Abacus.Run.Abstractions;
 using Abacus.Run.Core;
+using Abacus.Run.EventBus;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis;
 
-namespace Abacus.Run.EventBus;
+namespace Abacus.Adapters.Cache.Redis;
 
 /// <summary>
 /// Cross-service <see cref="IEventBroker"/> over Redis Streams.

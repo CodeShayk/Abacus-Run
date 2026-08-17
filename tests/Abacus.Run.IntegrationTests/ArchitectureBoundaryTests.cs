@@ -1,4 +1,6 @@
 using System.Reflection;
+using Abacus.Adapters.Messaging.RabbitMQ;
+using Abacus.Adapters.Cache.Redis;
 using Abacus.Run.Abstractions;
 using Abacus.Run.Api;
 using Abacus.Run.EventBus;
@@ -21,6 +23,8 @@ public class ArchitectureBoundaryTests
 {
     private static readonly Assembly Library = typeof(WorkflowRunner).Assembly;
     private static readonly Assembly Host = typeof(AbacusServiceCollectionExtensions).Assembly;
+    private static readonly Assembly RedisAdapter = typeof(RedisEventBroker).Assembly;
+    private static readonly Assembly RabbitMqAdapter = typeof(RabbitMqEventBroker).Assembly;
 
     [Fact]
     public void The_library_and_the_host_are_separate_assemblies()
@@ -72,7 +76,7 @@ public class ArchitectureBoundaryTests
     }
 
     [Fact]
-    public void Concrete_infrastructure_lives_in_the_host()
+    public void Storage_infrastructure_lives_in_the_host()
     {
         string[] hostTypes = Host.GetTypes()
             .Where(t => t.IsClass && !t.IsNested)
@@ -81,7 +85,61 @@ public class ArchitectureBoundaryTests
 
         hostTypes.Should().Contain(n => n.StartsWith("SqlServer", StringComparison.Ordinal),
             "SQL Server stores are deployment-specific");
-        hostTypes.Should().Contain("RedisEventBus", "the Redis bus is deployment-specific");
+    }
+
+    [Fact]
+    public void Transports_live_in_their_own_adapter_assemblies()
+    {
+        // Not in the host. A transport shipped inside a deployable is only reusable by copying it,
+        // and forces every consumer of that host to take its client library.
+        RedisAdapter.GetName().Name.Should().Be("Abacus.Adapters.Cache.Redis");
+        RabbitMqAdapter.GetName().Name.Should().Be("Abacus.Adapters.Messaging.RabbitMQ");
+
+        typeof(RedisEventBus).Assembly.Should().BeSameAs(RedisAdapter);
+        typeof(RedisEventBroker).Assembly.Should().BeSameAs(RedisAdapter);
+        typeof(RedisControlChannel).Assembly.Should().BeSameAs(RedisAdapter);
+        typeof(RabbitMqEventBroker).Assembly.Should().BeSameAs(RabbitMqAdapter);
+
+        Host.GetTypes().Select(t => t.Name).Should()
+            .NotContain(n => n.StartsWith("Redis", StringComparison.Ordinal)
+                          || n.StartsWith("RabbitMq", StringComparison.Ordinal),
+                "a transport left behind in the host would be the copy nobody updates");
+    }
+
+    [Theory]
+    [InlineData("Abacus.Adapters.Cache.Redis")]
+    [InlineData("Abacus.Adapters.Messaging.RabbitMQ")]
+    public void An_adapter_depends_on_the_framework_and_nothing_else_of_ours(string adapterName)
+    {
+        Assembly adapter = adapterName == "Abacus.Adapters.Cache.Redis" ? RedisAdapter : RabbitMqAdapter;
+
+        string[] references = [.. adapter.GetReferencedAssemblies().Select(a => a.Name!)];
+
+        references.Should().Contain("Abacus.Run", "an adapter exists to implement the framework's contracts");
+
+        references.Should().NotContain("Abacus.Run.Service",
+            "an adapter that referenced a host would be tied to one deployment");
+
+        // The two adapters must not know about each other, or choosing one would drag in the
+        // other's client library.
+        references.Should().NotContain(
+            adapterName == "Abacus.Adapters.Cache.Redis" ? "Abacus.Adapters.Messaging.RabbitMQ" : "Abacus.Adapters.Cache.Redis",
+            "transports are alternatives, not collaborators");
+    }
+
+    [Theory]
+    [InlineData("Abacus.Adapters.Cache.Redis", "StackExchange.Redis", "RabbitMQ.Client")]
+    [InlineData("Abacus.Adapters.Messaging.RabbitMQ", "RabbitMQ.Client", "StackExchange.Redis")]
+    public void An_adapter_carries_only_its_own_client_library(
+        string adapterName, string expected, string forbidden)
+    {
+        Assembly adapter = adapterName == "Abacus.Adapters.Cache.Redis" ? RedisAdapter : RabbitMqAdapter;
+
+        string[] references = [.. adapter.GetReferencedAssemblies().Select(a => a.Name!)];
+
+        references.Should().Contain(expected);
+        references.Should().NotContain(forbidden,
+            "referencing a transport means taking its client; taking both would defeat the split");
     }
 
     [Fact]
@@ -107,8 +165,9 @@ public class ArchitectureBoundaryTests
 
         // The prefix is the technology the adapter speaks. Adding one here is a deliberate act;
         // an adapter named for what it does rather than what it talks to is framework logic that
-        // has drifted back into the deployable.
-        string[] technologies = ["SqlServer", "Redis", "RabbitMq", "Sqlite"];
+        // has drifted back into the deployable. Transports are not on this list because they no
+        // longer live in the host at all.
+        string[] technologies = ["SqlServer", "Sqlite"];
 
         adapters.Should().OnlyContain(
             n => technologies.Any(t => n.StartsWith(t, StringComparison.Ordinal)));

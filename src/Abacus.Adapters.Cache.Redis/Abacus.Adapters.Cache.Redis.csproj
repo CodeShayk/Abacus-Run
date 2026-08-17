@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Abacus.Adapters.Cache.Redis</RootNamespace>
+    <AssemblyName>Abacus.Adapters.Cache.Redis</AssemblyName>
+    <Description>Redis adapters for Abacus.Run: Streams event bus, workflow event broker, and cross-replica control channel.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The framework only. An adapter that referenced a host would tie the transport to one
+         deployment, which is the whole thing this split exists to prevent. -->
+    <ProjectReference Include="../Abacus.Run/Abacus.Run.csproj" />
+    <PackageReference Include="StackExchange.Redis" Version="2.8.16" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="$(MicrosoftExtensionsVersion)" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="$(MicrosoftExtensionsVersion)" />
+  </ItemGroup>
+</Project>

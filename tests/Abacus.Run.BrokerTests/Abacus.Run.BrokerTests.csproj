@@ -14,7 +14,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The adapters under test, and the framework whose contracts they implement. Deliberately
+         not the host: these tests are about the transports, and pulling in a deployable would
+         make them depend on its wiring. -->
     <ProjectReference Include="../../src/Abacus.Run/Abacus.Run.csproj" />
-    <ProjectReference Include="../../src/Abacus.Run.Service/Abacus.Run.Service.csproj" />
+    <ProjectReference Include="../../src/Abacus.Adapters.Cache.Redis/Abacus.Adapters.Cache.Redis.csproj" />
+    <ProjectReference Include="../../src/Abacus.Adapters.Messaging.RabbitMQ/Abacus.Adapters.Messaging.RabbitMQ.csproj" />
   </ItemGroup>
 </Project>

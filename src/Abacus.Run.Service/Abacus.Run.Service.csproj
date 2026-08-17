@@ -5,8 +5,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="RabbitMQ.Client" Version="7.2.2" />
     <ProjectReference Include="../Abacus.Run/Abacus.Run.csproj" />
+
+    <!-- Transports are adapters, selected by configuration. The host references both so an operator
+         can choose either without a rebuild; neither is loaded unless its connection string is set. -->
+    <ProjectReference Include="../Abacus.Adapters.Cache.Redis/Abacus.Adapters.Cache.Redis.csproj" />
+    <ProjectReference Include="../Abacus.Adapters.Messaging.RabbitMQ/Abacus.Adapters.Messaging.RabbitMQ.csproj" />
+
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="9.0.9" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.9" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.9">
@@ -16,6 +21,5 @@
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="$(MicrosoftExtensionsVersion)" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="$(MicrosoftExtensionsVersion)" />
     <PackageReference Include="Microsoft.Extensions.Options" Version="$(MicrosoftExtensionsVersion)" />
-    <PackageReference Include="StackExchange.Redis" Version="2.8.16" />
   </ItemGroup>
 </Project>

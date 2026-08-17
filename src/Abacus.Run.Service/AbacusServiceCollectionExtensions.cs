@@ -1,6 +1,7 @@
+using Abacus.Adapters.Messaging.RabbitMQ;
+using Abacus.Adapters.Cache.Redis;
 using Abacus.Run.Api;
 using Abacus.Run.Service.ControlPlane;
-using Abacus.Run.EventBus;
 using Abacus.Run.Service.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;

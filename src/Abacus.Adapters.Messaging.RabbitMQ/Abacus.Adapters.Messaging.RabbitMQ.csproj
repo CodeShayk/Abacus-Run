@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Abacus.Adapters.Messaging.RabbitMQ</RootNamespace>
+    <AssemblyName>Abacus.Adapters.Messaging.RabbitMQ</AssemblyName>
+    <Description>RabbitMQ adapter for Abacus.Run: a topic-exchange workflow event broker.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The framework only. An adapter that referenced a host would tie the transport to one
+         deployment, which is the whole thing this split exists to prevent. -->
+    <ProjectReference Include="../Abacus.Run/Abacus.Run.csproj" />
+    <PackageReference Include="RabbitMQ.Client" Version="7.2.2" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="$(MicrosoftExtensionsVersion)" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="$(MicrosoftExtensionsVersion)" />
+  </ItemGroup>
+</Project>

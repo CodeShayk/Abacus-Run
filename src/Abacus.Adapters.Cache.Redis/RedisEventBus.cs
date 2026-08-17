@@ -6,7 +6,7 @@ using Abacus.Run.Core;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis;
 
-namespace Abacus.Run.EventBus;
+namespace Abacus.Adapters.Cache.Redis;
 
 /// <summary>
 /// Redis Streams implementation of <see cref="IEventBus"/> (TDD §10.2).

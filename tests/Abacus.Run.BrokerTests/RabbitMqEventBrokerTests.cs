@@ -1,5 +1,5 @@
 using Abacus.Run.Abstractions;
-using Abacus.Run.EventBus;
+using Abacus.Adapters.Messaging.RabbitMQ;
 using FluentAssertions;
 using Xunit;
 
