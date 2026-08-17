@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace Abacus.Run.Dsl.Expressions;
@@ -77,17 +78,55 @@ public readonly struct AbExValue : IEquatable<AbExValue>
                 return new AbExValue(AbExValueKind.Object, node: obj);
 
             case JsonValue value:
-                if (value.TryGetValue(out bool b)) return Bool(b);
-                if (value.TryGetValue(out decimal d)) return Number(d);
-                if (value.TryGetValue(out string? s) && s is not null) return String(s);
+                // Classified by JSON kind first, not by trying CLR types in turn. A JsonValue holds
+                // whatever the writer put in it — JsonValue.Create(200) is backed by int, and asking
+                // it for a decimal simply fails — so type-probing quietly turned numbers into
+                // strings and made '$.status == 200' false against a genuine 200.
+                switch (value.GetValueKind())
+                {
+                    case JsonValueKind.True:
+                        return True;
 
-                // A JsonValue wrapping something exotic still has a JSON text form; fall back to it
-                // rather than reporting absence for a value that demonstrably exists.
-                return String(value.ToJsonString().Trim('"'));
+                    case JsonValueKind.False:
+                        return False;
+
+                    case JsonValueKind.Number:
+                        return Number(ReadNumber(value));
+
+                    case JsonValueKind.String:
+                        return value.TryGetValue(out string? text) && text is not null
+                            ? String(text)
+                            : String(value.ToJsonString().Trim('"'));
+
+                    case JsonValueKind.Null:
+                        return Null;
+
+                    default:
+                        return String(value.ToJsonString().Trim('"'));
+                }
 
             default:
                 return String(node.ToJsonString());
         }
+    }
+
+    /// <summary>
+    /// Reads a number whatever CLR type backs it. Decimal throughout, so money keeps its scale; a
+    /// double that will not fit is taken as a double and converted, which loses precision but never
+    /// loses the value.
+    /// </summary>
+    private static decimal ReadNumber(JsonValue value)
+    {
+        if (value.TryGetValue(out decimal d)) return d;
+        if (value.TryGetValue(out long l)) return l;
+        if (value.TryGetValue(out int i)) return i;
+        if (value.TryGetValue(out double dbl)) return (decimal)dbl;
+        if (value.TryGetValue(out float f)) return (decimal)f;
+
+        return decimal.TryParse(
+            value.ToJsonString(), NumberStyles.Number, CultureInfo.InvariantCulture, out decimal parsed)
+            ? parsed
+            : 0m;
     }
 
     /// <summary>Length as <c>len()</c> defines it: characters, elements, or properties.</summary>

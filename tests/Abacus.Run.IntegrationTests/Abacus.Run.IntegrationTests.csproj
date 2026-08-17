@@ -3,6 +3,7 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../../src/Abacus.Run.Dsl/Abacus.Run.Dsl.csproj" />
     <ProjectReference Include="../../src/Abacus.Run.Service/Abacus.Run.Service.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
     <PackageReference Include="xunit" Version="2.9.2" />

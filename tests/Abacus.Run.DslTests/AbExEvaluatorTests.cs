@@ -343,4 +343,65 @@ public class AbExEvaluatorTests
     [Fact]
     public void Trailing_zeros_are_trimmed()
         => AbExValue.Number(1.50m).ToText().Should().Be("1.5");
+
+    // ---- value classification -------------------------------------------------------------
+
+    /// <summary>
+    /// A JsonValue holds whatever the writer put in it. Probing CLR types in turn used to fail for
+    /// an int-backed value — JsonValue.Create(200) will not hand back a decimal — and fall through
+    /// to the string branch, so an HTTP status of 200 compared as "200" and never equalled 200.
+    /// </summary>
+    [Fact]
+    public void Numbers_are_read_whatever_clr_type_backs_them()
+    {
+        var data = new JsonObject
+        {
+            ["fromInt"] = JsonValue.Create(200),
+            ["fromLong"] = JsonValue.Create(11L),
+            ["fromDouble"] = JsonValue.Create(1.5d),
+            ["fromDecimal"] = JsonValue.Create(429.5m),
+            ["fromFloat"] = JsonValue.Create(2.5f)
+        };
+
+        var context = new AbExContext(data, null, []);
+
+        foreach (string field in new[] { "fromInt", "fromLong", "fromDouble", "fromDecimal", "fromFloat" })
+        {
+            Eval($"$.{field}", context).Kind.Should().Be(AbExValueKind.Number, $"{field} is a number");
+        }
+
+        Eval("$.fromInt", context).AsNumber.Should().Be(200m);
+        Eval("$.fromLong", context).AsNumber.Should().Be(11m);
+        Eval("$.fromDecimal", context).AsNumber.Should().Be(429.5m);
+        Cond("$.fromInt == 200", context).Should().BeTrue();
+        Cond("$.fromInt > 199", context).Should().BeTrue();
+    }
+
+    [Fact]
+    public void Booleans_and_strings_are_read_whatever_backs_them()
+    {
+        var data = new JsonObject
+        {
+            ["flag"] = JsonValue.Create(true),
+            ["name"] = JsonValue.Create("abc")
+        };
+
+        var context = new AbExContext(data, null, []);
+
+        Eval("$.flag", context).Kind.Should().Be(AbExValueKind.Boolean);
+        Cond("$.flag", context).Should().BeTrue();
+        Eval("$.name", context).Kind.Should().Be(AbExValueKind.String);
+        Eval("$.name", context).AsString.Should().Be("abc");
+    }
+
+    /// <summary>Values written by a node must read back the same way after a JSON round trip.</summary>
+    [Fact]
+    public void Classification_survives_a_serialization_round_trip()
+    {
+        var original = new JsonObject { ["status"] = JsonValue.Create(200) };
+        JsonNode? reparsed = JsonNode.Parse(original.ToJsonString());
+
+        Eval("$.status", new AbExContext(original, null, [])).AsNumber.Should().Be(200m);
+        Eval("$.status", new AbExContext(reparsed, null, [])).AsNumber.Should().Be(200m);
+    }
 }

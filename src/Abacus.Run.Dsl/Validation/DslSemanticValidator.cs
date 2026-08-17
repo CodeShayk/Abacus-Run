@@ -374,11 +374,20 @@ public static class DslSemanticValidator
 
         foreach (DslTrigger trigger in document.Triggers)
         {
-            if (trigger.CorrelationKey is { Length: > 0 } key)
+            // A trigger's correlation key is a literal filter value, not a projection: the
+            // subscription is registered before any message exists, so there is nothing for a path
+            // to read. One that looks like an expression is almost certainly a misunderstanding.
+            if (trigger.CorrelationKey is { Length: > 0 } key && key.StartsWith('$'))
             {
-                Check($"{trigger.Pointer}/correlationKey", key, false, "correlation key");
+                diagnostics.Add(DslDiagnostic.Warning(
+                    DslCodes.ExpressionParseError, $"{trigger.Pointer}/correlationKey",
+                    $"'{key}' is used as a literal correlation key, not evaluated.",
+                    "A trigger subscription is registered before any message arrives, so there is " +
+                    "nothing for an expression to read. Use the literal key you expect to match."));
             }
 
+            // contextFrom does have a message in scope — the one that fired the trigger — so it is
+            // a real expression, rooted at the payload.
             if (trigger.ContextFrom is { Length: > 0 } from)
             {
                 Check($"{trigger.Pointer}/contextFrom", from, false, "context projection");

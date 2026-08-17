@@ -35,6 +35,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Tests reach a few internals (status matching, path assignment) rather than forcing them onto
+         the public surface just to be testable. -->
+    <InternalsVisibleTo Include="Abacus.Run.DslTests" />
+    <InternalsVisibleTo Include="Abacus.Run.IntegrationTests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../Abacus.Run/Abacus.Run.csproj" />
   </ItemGroup>
 

@@ -7,12 +7,88 @@ workflow behaves; the DSL is a second front end onto the runtime that already ex
 
 | # | Phase | Delivers | Depends on | Status |
 | - | ----- | -------- | ---------- | ------ |
-| 1 | Envelope and expression core | `DslMessage`, AbEx parser and evaluator | — | ✅ Done — 207 tests |
-| 2 | Document model and validation | Parser, JSON Schema, semantic validator, diagnostics | 1 | ✅ Done — 317 tests |
-| 3 | Interpreter | `DslWorkflowDefinition`, node factories, graph construction | 1, 2 | ⬜ Not started |
-| 4 | Host integration | Registration, `IContextValidatingWorkflow`, catalog and validate endpoints | 3 | ⬜ Not started |
+| 1 | Envelope and expression core | `DslMessage`, AbEx parser and evaluator | — | ✅ Done |
+| 2 | Document model and validation | Parser, JSON Schema, semantic validator, diagnostics | 1 | ✅ Done |
+| 3 | Interpreter | `DslWorkflowDefinition`, node factories, graph construction | 1, 2 | ✅ Done |
+| 4 | Host integration | Registration, `IContextValidatingWorkflow`, catalog and validate endpoints | 3 | ✅ Done |
 | 5 | Documentation and worked example | Wiki chapter, README, a shipped example document | 4 | ⬜ Not started |
 | 6 | Deferred | Runtime publication API, sub-workflows, iteration | 5 | ⬜ Out of scope |
+
+## Status
+
+Phases 1–4 landed. Suites green: **723 unit** (unchanged), **358 DSL unit**, **201 integration**
+(+51), **7 chaos**.
+
+| Delivered | Where |
+| --------- | ----- |
+| `DslMessage` envelope, `$run` metadata, self-resolving templates | [Interpretation/DslMessage.cs](../../src/Abacus.Run.Dsl/Interpretation/DslMessage.cs) |
+| AbEx lexer, parser, AST, evaluator, static analysis, closed function set | [Expressions/](../../src/Abacus.Run.Dsl/Expressions/) |
+| Typed document model with a JSON Pointer on every element | [Model/](../../src/Abacus.Run.Dsl/Model/) |
+| Schema validation, 22-code semantic validator, canonical hash | [Validation/](../../src/Abacus.Run.Dsl/Validation/) |
+| Entry/exit nodes, per-kind factories, hosted-executor adapter | [Interpretation/DslBuiltInNodes.cs](../../src/Abacus.Run.Dsl/Interpretation/DslBuiltInNodes.cs) |
+| Graph construction, gates, failure rules, notifications, triggers | [Interpretation/DslWorkflowDefinition.cs](../../src/Abacus.Run.Dsl/Interpretation/DslWorkflowDefinition.cs) |
+| Deferred registration, directory loading, custom node catalog | [Hosting/](../../src/Abacus.Run.Dsl/Hosting/) |
+| `IContextValidatingWorkflow`, consulted after the type bind | [Core/WorkflowRegistry.cs](../../src/Abacus.Run/Core/WorkflowRegistry.cs) |
+| `ITemplateBindingSource` | [Executors/TemplateEngine.cs](../../src/Abacus.Run/Executors/TemplateEngine.cs) |
+| `/dsl/schema`, `/dsl/nodes`, `/dsl/functions`, `/dsl/documents`, `/dsl/validate` | [Hosting/DslEndpoints.cs](../../src/Abacus.Run.Dsl/Hosting/DslEndpoints.cs) |
+
+### Deviations from the plan as written
+
+**The core change is two interfaces, not one.** `IContextValidatingWorkflow` was planned.
+`ITemplateBindingSource` was not: `TemplateBindings` resolves dotted paths by reflection over a
+single root object, which cannot address an envelope carrying both a context and a payload. It is
+additive and opt-in — a type that does not implement it resolves exactly as before — and it is what
+lets `{{ $ctx.orderId }}` work inside the existing `ApiCallExecutor` and `LlmExecutor` rather than
+forking either.
+
+**Two grammar changes.** Unary `!` and `-` bind tightest, rather than sitting between `&&` and
+comparison as first written — `!has($.x) && …` is the common shape and standard precedence is what
+an author expects. And bare-identifier path roots are gone: every path starts `$`, `$ctx` or `$run`,
+which removes a real ambiguity between a path and a function name.
+
+**The graph has an entry and an exit node.** Neither was planned. The runner sends the deserialized
+context as the first message, typed `JsonElement`, and the engine routes by type — so without a node
+typed to receive it the first DSL node never runs and the workflow completes having done nothing.
+The exit node exists for the mirror reason: `YieldOutputAsync` is checked against the executor's
+declared output type, so a DSL node cannot yield anything but an envelope, and the caller would
+otherwise get the start context back as though it were a result. Both use ids (`$entry`, `$exit`)
+that a declared node id cannot collide with.
+
+**Fan-in aggregates across invocations.** The plan assumed `AddFanInBarrierEdge` delivers a list.
+It does not: `FanInEdgeRunner` type-checks the target against the *individual* message and delivers
+the released messages separately. The DSL node therefore holds arrivals and emits once the last one
+lands, with the expected count read from the document. See the note below — the framework's own
+`FanInExecutor<TItem, TOut>` has the same problem and does not work with a barrier edge.
+
+**Trigger `correlationKey` is a literal, not an expression.** A trigger subscription is registered
+before any message exists, so there is nothing for a path to read. The validator now warns when one
+is written to look like an expression rather than silently evaluating or silently dropping it.
+`contextFrom` *is* an expression, and is wired to `DomainEventTrigger.ContextSelector`.
+
+### Defects found by these tests
+
+**`AbExValue.FromNode` misread numbers.** It probed CLR types in turn, and a `JsonValue` created
+from an `int` will not hand back a `decimal` — so `JsonValue.Create(200)` fell through to the string
+branch and an HTTP status of 200 compared as `"200"`, never equalling `200`. Now classified by
+`GetValueKind()` first. Regression-tested across int, long, double, decimal and float backing, and
+across a serialization round trip.
+
+**The semantic validator crashed on duplicate node ids** — one of the things it exists to report —
+because it built its kind lookup with `ToDictionary`. Now built tolerantly, with robustness tests
+over pathological documents.
+
+### Pre-existing issues found, not fixed here
+
+**`FanInExecutor<TItem, TOut>` cannot work with `AddFanInBarrierEdge`.** It is declared
+`HostExecutor<List<TItem>, TOut>`, but `FanInEdgeRunner.ChaseEdgeAsync` filters released messages by
+`CanHandle(target, individualMessageType)` — a target declaring `List<TItem>` matches nothing and the
+delivery is dropped as a type mismatch. Nothing in the repository exercises it, and the wiki's
+"the barrier delivers a list" is wrong. Out of scope for the DSL, which works around it, but it is a
+real defect in the compiled surface.
+
+**No `ITimerService` is registered anywhere in the host.** `DelayExecutor` requires one, so a `delay`
+node — and a compiled workflow using `DelayExecutor` — cannot run on a stock host. The DSL test
+fixture registers an in-memory implementation; a deployable host has nothing.
 
 Phases 1–2 are independently testable with no host involved and carry most of the risk. Phase 3 is
 mechanical once they land. Phase 4 is small — deliberately, because the design keeps the core change
