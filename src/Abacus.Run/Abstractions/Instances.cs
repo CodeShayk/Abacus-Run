@@ -103,17 +103,44 @@ public sealed record EventEnvelope
     public required DateTimeOffset OccurredAt { get; init; }
 
     /// <summary>
-    /// Fanned out to live subscribers but never appended to the durable store, and carrying no
-    /// sequence number.
+    /// The workflow this instance is running. Denormalised onto the event so the log can be read and
+    /// filtered by workflow without joining back to the instance row.
+    /// </summary>
+    public string? WorkflowName { get; init; }
+
+    /// <summary>Where this event goes: the durable log, live subscribers, or both.</summary>
+    public EventDeliveryMode Delivery { get; init; } = EventDeliveryMode.StreamAndLog;
+
+    /// <summary>True when the event carries no sequence number and leaves no durable record.</summary>
+    public bool IsStreamOnly => Delivery == EventDeliveryMode.StreamOnly;
+}
+
+/// <summary>
+/// Where an event is delivered. One enum rather than a pair of booleans, because "neither" is not a
+/// meaningful destination and should not be representable.
+/// </summary>
+public enum EventDeliveryMode
+{
+    /// <summary>Appended to the durable log and fanned out to live subscribers. The default.</summary>
+    StreamAndLog,
+
+    /// <summary>
+    /// Appended to the durable log only. For a workflow that wants a queryable event record without
+    /// a live stream — the run is still fully observable after the fact, just not as it happens.
+    /// </summary>
+    LogOnly,
+
+    /// <summary>
+    /// Fanned out to live subscribers only, carrying no sequence number and leaving no record.
     /// </summary>
     /// <remarks>
     /// For data with no replay value — streamed LLM tokens, where the complete text is in the
-    /// executor's output anyway. A transient event takes no sequence number, so the durable sequence
-    /// stays gapless and <c>Last-Event-ID</c> catch-up keeps working; it is written to SSE without an
-    /// <c>id:</c> field, which is what stops a reconnecting client waiting for a chunk that no longer
-    /// exists. A token stream is not resumable and the transport should say so.
+    /// executor's output anyway. Taking no sequence number keeps the durable sequence gapless so
+    /// <c>Last-Event-ID</c> catch-up still works, and the event is written to SSE without an
+    /// <c>id:</c> field, which stops a reconnecting client waiting for a chunk that no longer exists.
+    /// A token stream is not resumable and the transport should say so.
     /// </remarks>
-    public bool Transient { get; init; }
+    StreamOnly
 }
 
 /// <summary>

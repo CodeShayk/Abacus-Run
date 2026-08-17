@@ -19,6 +19,7 @@ public sealed class NodeNotifier : INodeNotifier
 
     private readonly string _instanceId;
     private readonly string? _tenantId;
+    private readonly string? _workflowName;
     private readonly string _executorId;
     private readonly IEventSink _events;
     private readonly EventSequencer _sequencer;
@@ -34,10 +35,12 @@ public sealed class NodeNotifier : INodeNotifier
         EventSequencer sequencer,
         NotificationPolicy policy,
         Func<int> superstep,
-        TimeProvider clock)
+        TimeProvider clock,
+        string? workflowName = null)
     {
         _instanceId = instanceId;
         _tenantId = tenantId;
+        _workflowName = workflowName;
         _executorId = executorId;
         _events = events;
         _sequencer = sequencer;
@@ -76,15 +79,15 @@ public sealed class NodeNotifier : INodeNotifier
             return ValueTask.CompletedTask;
         }
 
-        // A transient event takes no sequence number, so the durable sequence stays gapless.
-        long sequence = transient ? 0 : _sequencer.Next(_instanceId);
+        EventDeliveryMode delivery = _policy.DeliveryFor(
+            transient ? EventDeliveryMode.StreamOnly : EventDeliveryMode.StreamAndLog);
+
+        // A stream-only event takes no sequence number, so the durable sequence stays gapless.
+        long sequence = delivery == EventDeliveryMode.StreamOnly ? 0 : _sequencer.Next(_instanceId);
 
         EventEnvelope envelope = EventFactory.Create(
             _instanceId, sequence, eventType, payload,
-            _executorId, _superstep(), _tenantId, _clock.GetUtcNow()) with
-        {
-            Transient = transient
-        };
+            _executorId, _superstep(), _tenantId, _clock.GetUtcNow(), _workflowName, delivery);
 
         return _events.PublishAsync(envelope, cancellationToken);
     }
@@ -142,10 +145,36 @@ public interface INotifyingWorkflow
 
 public sealed record NotificationPolicy
 {
-    /// <summary>Emits everything. Used when a definition declares no policy.</summary>
+    /// <summary>Emits everything, streamed and logged. Used when a definition declares no policy.</summary>
     public static NotificationPolicy Default { get; } = new();
 
     public NotificationLevel Level { get; init; } = NotificationLevel.Standard;
+
+    /// <summary>
+    /// Whether this workflow's events reach live subscribers as well as the durable log.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="EventDeliveryMode.StreamAndLog"/> is the default and the ordinary case. A workflow
+    /// sets <see cref="EventDeliveryMode.LogOnly"/> when it wants a queryable record of what
+    /// happened without paying for live fan-out — a nightly batch nobody watches, or a run whose
+    /// events are read afterwards rather than followed.
+    /// </para>
+    /// <para>
+    /// The run stays fully observable either way; only the timing changes. Read a log-only
+    /// workflow's events at <c>GET /v2/workflows/{name}/instances/{id}/events</c>. Its SSE endpoint
+    /// refuses rather than holding open a stream that will never produce anything, because a
+    /// silently empty stream is indistinguishable from a stalled run.
+    /// </para>
+    /// <para>
+    /// <see cref="EventDeliveryMode.StreamOnly"/> is not a valid workflow-level choice — it belongs
+    /// to individual events with no replay value, not to a whole run.
+    /// </para>
+    /// </remarks>
+    public EventDeliveryMode Delivery { get; init; } = EventDeliveryMode.StreamAndLog;
+
+    /// <summary>True when this workflow has opted out of live streaming.</summary>
+    public bool IsLogOnly => Delivery == EventDeliveryMode.LogOnly;
 
     /// <summary>Per-executor overrides: quiet a chatty fan-out, keep the interesting node loud.</summary>
     public IReadOnlyDictionary<string, NotificationLevel> ByNode { get; init; } =
@@ -199,9 +228,24 @@ public sealed record NotificationPolicy
         || eventType.StartsWith("instance.", StringComparison.Ordinal)
         || eventType.StartsWith("event.", StringComparison.Ordinal);
 
-    /// <summary>Validates declared names at composition time, so a bad one fails startup.</summary>
+    /// <summary>
+    /// Resolves the delivery mode for one event. A stream-only event stays stream-only under a
+    /// log-only workflow — which means it goes nowhere, and that is the correct reading: a workflow
+    /// that has opted out of streaming has opted out of streamed tokens too.
+    /// </summary>
+    public EventDeliveryMode DeliveryFor(EventDeliveryMode requested)
+        => requested == EventDeliveryMode.StreamOnly ? requested : Delivery;
+
+    /// <summary>Validates declared names and the delivery choice at composition time.</summary>
     public void Validate(string workflowName)
     {
+        if (Delivery == EventDeliveryMode.StreamOnly)
+        {
+            throw new InvalidOperationException(
+                $"Workflow '{workflowName}' declares {nameof(EventDeliveryMode.StreamOnly)} delivery, which would " +
+                "leave the run with no durable event record at all. Use StreamAndLog or LogOnly.");
+        }
+
         foreach (string name in Emits)
         {
             try

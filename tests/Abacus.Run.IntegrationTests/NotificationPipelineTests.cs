@@ -163,6 +163,39 @@ public sealed class QuietWorkflow : IWorkflowDefinition<ClassifyContext, Classif
     }
 }
 
+/// <summary>Opts out of live streaming; its events are read afterwards rather than followed.</summary>
+public sealed class LogOnlyWorkflow : IWorkflowDefinition<ClassifyContext, ClassifyResult>, INotifyingWorkflow
+{
+    public string Name => "log-only";
+    public string Version => "1.0.0";
+
+    public NotificationPolicy Notifications { get; } = new() { Delivery = EventDeliveryMode.LogOnly };
+
+    public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken cancellationToken)
+    {
+        ExecutorBinding step = context.Node(new Step("batch-step"));
+
+        return new ValueTask<Workflow>(new WorkflowBuilder(step)
+            .WithOutputFrom(step)
+            .WithName(Name)
+            .Build());
+    }
+
+    private sealed class Step(string id) : HostExecutor<ClassifyContext, ClassifyResult>(id)
+    {
+        protected override async ValueTask<ClassifyResult> ExecuteCoreAsync(
+            ClassifyContext input, IWorkflowContext context, CancellationToken cancellationToken)
+        {
+            if (Runtime.Notify is { } notify)
+            {
+                await notify.NotifyAsync("batch.processed", new { rows = 500 }, cancellationToken);
+            }
+
+            return new ClassifyResult(input.Text, null);
+        }
+    }
+}
+
 public sealed class NotificationFixture : WebApplicationFactory<Program>
 {
     protected override IHost CreateHost(IHostBuilder builder)
@@ -172,6 +205,7 @@ public sealed class NotificationFixture : WebApplicationFactory<Program>
             services.AddSingleton<IWorkflowDefinition>(new StreamingLlmWorkflow());
             services.AddSingleton<IWorkflowDefinition>(new NotifyingWorkflow());
             services.AddSingleton<IWorkflowDefinition>(new QuietWorkflow());
+            services.AddSingleton<IWorkflowDefinition>(new LogOnlyWorkflow());
         });
 
         return base.CreateHost(builder);
@@ -339,5 +373,124 @@ public class NotificationPipelineTests : IClassFixture<NotificationFixture>
 
         body.Should().Contain("custom.documents.scanned",
             "a consumer should discover the vocabulary rather than reverse-engineer it");
+    }
+}
+
+public class EventLogTests : IClassFixture<NotificationFixture>
+{
+    private readonly NotificationFixture _fixture;
+
+    public EventLogTests(NotificationFixture fixture) => _fixture = fixture;
+
+    [Fact]
+    public async Task A_log_only_workflow_still_records_a_full_event_history()
+    {
+        WorkflowInstance instance = await _fixture.RunAsync("log-only");
+        instance.Status.Should().Be(InstanceStatus.Completed);
+
+        IReadOnlyList<EventEnvelope> events = await _fixture.EventsOfAsync(instance.InstanceId);
+
+        events.Should().Contain(e => e.EventType == WorkflowEventTypes.WorkflowStarted);
+        events.Should().Contain(e => e.EventType == WorkflowEventTypes.WorkflowTerminated);
+        events.Should().Contain(e => e.EventType == "custom.batch.processed",
+            "opting out of streaming does not opt out of recording");
+
+        events.Should().OnlyContain(e => e.Delivery == EventDeliveryMode.LogOnly);
+    }
+
+    [Fact]
+    public async Task Every_logged_event_carries_the_workflow_name()
+    {
+        WorkflowInstance instance = await _fixture.RunAsync("log-only");
+
+        IReadOnlyList<EventEnvelope> events = await _fixture.EventsOfAsync(instance.InstanceId);
+
+        events.Should().OnlyContain(e => e.WorkflowName == "log-only",
+            "the log is filterable by workflow without joining back to the instance row");
+    }
+
+    [Fact]
+    public async Task The_sse_endpoint_refuses_a_log_only_workflow_instead_of_hanging()
+    {
+        WorkflowInstance instance = await _fixture.RunAsync("log-only");
+        HttpClient client = _fixture.CreateClient();
+
+        HttpResponseMessage response = await client.GetAsync($"/instances/{instance.InstanceId}/events");
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.Conflict,
+            "an empty stream held open is indistinguishable from a stalled run");
+
+        string body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain($"/v2/workflows/log-only/instances/{instance.InstanceId}/events",
+            "a refusal should say where the events actually are");
+    }
+
+    [Fact]
+    public async Task The_sse_endpoint_still_serves_a_streaming_workflow()
+    {
+        WorkflowInstance instance = await _fixture.RunAsync("notifying");
+        HttpClient client = _fixture.CreateClient();
+
+        // Terminal instance: the stream replays history and closes, so this returns rather than hangs.
+        HttpResponseMessage response = await client.GetAsync($"/instances/{instance.InstanceId}/events");
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        (await response.Content.ReadAsStringAsync()).Should().Contain("custom.documents.scanned");
+    }
+
+    [Fact]
+    public async Task The_v2_event_log_returns_the_instance_and_workflow_with_its_events()
+    {
+        WorkflowInstance instance = await _fixture.RunAsync("log-only");
+        HttpClient client = _fixture.CreateClient();
+
+        string body = await client.GetStringAsync(
+            $"/v2/workflows/log-only/instances/{instance.InstanceId}/events");
+
+        body.Should().Contain(instance.InstanceId);
+        body.Should().Contain("\"workflowName\":\"log-only\"");
+        body.Should().Contain("custom.batch.processed");
+
+        // The payload is a JSON object in the response, not an escaped string a caller parses twice.
+        body.Should().Contain("\"rows\":500");
+    }
+
+    [Fact]
+    public async Task The_v2_event_log_works_for_a_streaming_workflow_too()
+    {
+        WorkflowInstance instance = await _fixture.RunAsync("notifying");
+        HttpClient client = _fixture.CreateClient();
+
+        string body = await client.GetStringAsync(
+            $"/v2/workflows/notifying/instances/{instance.InstanceId}/events");
+
+        body.Should().Contain("custom.documents.scanned",
+            "the log is the same rows either way; only the live stream differs");
+    }
+
+    [Fact]
+    public async Task The_v2_event_log_rejects_a_workflow_that_does_not_own_the_instance()
+    {
+        WorkflowInstance instance = await _fixture.RunAsync("log-only");
+        HttpClient client = _fixture.CreateClient();
+
+        HttpResponseMessage response = await client.GetAsync(
+            $"/v2/workflows/notifying/instances/{instance.InstanceId}/events");
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.NotFound,
+            "naming the wrong workflow is a caller mistake, not a filter");
+    }
+
+    [Fact]
+    public async Task The_v2_event_log_filters_by_type_and_cursor()
+    {
+        WorkflowInstance instance = await _fixture.RunAsync("log-only");
+        HttpClient client = _fixture.CreateClient();
+
+        string body = await client.GetStringAsync(
+            $"/v2/workflows/log-only/instances/{instance.InstanceId}/events?types=custom.batch.processed");
+
+        body.Should().Contain("custom.batch.processed");
+        body.Should().NotContain(WorkflowEventTypes.WorkflowStarted);
     }
 }

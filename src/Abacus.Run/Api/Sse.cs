@@ -17,10 +17,10 @@ public static class Sse
         ArgumentNullException.ThrowIfNull(response);
         ArgumentNullException.ThrowIfNull(envelope);
 
-        // A transient event carries no sequence number, so it is written without an id. That leaves
+        // A stream-only event carries no sequence number, so it is written without an id. That leaves
         // the client's Last-Event-ID pinned to the last durable event, which is what stops a
         // reconnect waiting for a chunk that no longer exists — a token stream is not resumable.
-        string frame = envelope.Transient
+        string frame = envelope.IsStreamOnly
             ? $"event: {envelope.EventType}\ndata: {envelope.PayloadJson}\n\n"
             : $"event: {envelope.EventType}\nid: {envelope.Sequence}\ndata: {envelope.PayloadJson}\n\n";
 
@@ -111,16 +111,16 @@ public static class Sse
 
                 while (buffer.Reader.TryRead(out EventEnvelope? envelope))
                 {
-                    // Transient events are exempt from sequence de-duplication: they have no
+                    // Stream-only events are exempt from sequence de-duplication: they have no
                     // sequence to compare, and they were never in the backfill to be duplicated.
-                    if (!envelope.Transient && envelope.Sequence <= lastSequence)
+                    if (!envelope.IsStreamOnly && envelope.Sequence <= lastSequence)
                     {
                         continue;   // already delivered during backfill
                     }
 
                     await WriteEventAsync(http.Response, envelope, cancellationToken).ConfigureAwait(false);
 
-                    if (!envelope.Transient)
+                    if (!envelope.IsStreamOnly)
                     {
                         lastSequence = envelope.Sequence;
                     }

@@ -284,6 +284,7 @@ Policies are keyed by workflow **version**, since executor ids and gates change 
 - `GET /instances/{id}/checkpoints`
 - `GET /instances/{id}/events/history`
 - `GET /instances/{id}/events`
+- `GET /v2/workflows/{name}/instances/{id}/events`
 - `POST /instances/{id}/cancel`
 - `POST /instances/{id}/retry`
 - `POST /instances/{id}/rerun`
@@ -350,6 +351,26 @@ A definition controls what its runs emit by implementing `INotifyingWorkflow` �
 `Lifecycle` or `Standard`, overridable per node in both directions, plus the custom names it declares
 for the catalog API. Terminal events are never suppressible, and filtering happens before a sequence
 number is taken, so the gapless sequence that `Last-Event-ID` catch-up depends on stays intact.
+
+The same policy decides *where* events go. The default is both the durable log and the live stream; a
+workflow nobody watches as it happens can keep the record and drop the stream:
+
+```csharp
+public NotificationPolicy Notifications { get; } = new()
+{
+    Delivery = EventDeliveryMode.LogOnly
+};
+```
+
+| Mode | Durable log | Live stream |
+| --- | --- | --- |
+| `StreamAndLog` *(default)* | Yes | Yes |
+| `LogOnly` | Yes | No |
+
+A log-only run stays fully observable — events are still sequenced, redacted, and carry the workflow
+name — and are read at `GET /v2/workflows/{name}/instances/{id}/events`. Its SSE endpoint returns
+`409` pointing at that route rather than holding open a stream that will never produce anything,
+because an empty stream is indistinguishable from a stalled run.
 
 An `LlmExecutor` emits one `llm.completed` per call carrying model, prompt version, tokens, cost,
 latency and finish reason. Streamed tokens (`llm.delta`, opt-in per node via `StreamDeltas`) are

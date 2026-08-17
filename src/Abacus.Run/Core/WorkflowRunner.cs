@@ -356,7 +356,7 @@ public sealed class WorkflowRunner
             Notify = new NodeNotifier(
                 instance.InstanceId, instance.TenantId, executor.Id,
                 _deps.Events, _deps.Sequencer, _notifications,
-                () => _currentSuperstep, _deps.Clock),
+                () => _currentSuperstep, _deps.Clock, instance.WorkflowName),
             ExecutorInvoked = async (executorId, superstep) =>
             {
                 _hostInvocationEvents.Enqueue(executorId);
@@ -509,7 +509,8 @@ public sealed class WorkflowRunner
         return _deps.Events.PublishAsync(
             EventFactory.Create(
                 instance.InstanceId, _deps.Sequencer.Next(instance.InstanceId), eventType, payload,
-                executorId, _currentSuperstep, instance.TenantId, _deps.Clock.GetUtcNow()),
+                executorId, _currentSuperstep, instance.TenantId, _deps.Clock.GetUtcNow(),
+                instance.WorkflowName, _notifications.Delivery),
             cancellationToken);
     }
 
@@ -525,13 +526,18 @@ public sealed class WorkflowRunner
             return ValueTask.CompletedTask;
         }
 
+        // Stream-only under a log-only workflow means nowhere, which is the correct reading: opting
+        // out of streaming opts out of streamed tokens too.
+        if (_notifications.IsLogOnly)
+        {
+            return ValueTask.CompletedTask;
+        }
+
         return _deps.Events.PublishAsync(
             EventFactory.Create(
                 instance.InstanceId, 0, eventType, payload,
-                executorId, _currentSuperstep, instance.TenantId, _deps.Clock.GetUtcNow()) with
-            {
-                Transient = true
-            },
+                executorId, _currentSuperstep, instance.TenantId, _deps.Clock.GetUtcNow(),
+                instance.WorkflowName, EventDeliveryMode.StreamOnly),
             cancellationToken);
     }
 

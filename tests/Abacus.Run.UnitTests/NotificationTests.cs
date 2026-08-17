@@ -90,6 +90,52 @@ public class NotificationPolicyTests
     }
 
     [Fact]
+    public void Delivery_defaults_to_streaming_and_logging()
+    {
+        NotificationPolicy.Default.Delivery.Should().Be(EventDeliveryMode.StreamAndLog);
+        NotificationPolicy.Default.IsLogOnly.Should().BeFalse();
+    }
+
+    [Fact]
+    public void A_log_only_workflow_downgrades_ordinary_events()
+    {
+        var policy = new NotificationPolicy { Delivery = EventDeliveryMode.LogOnly };
+
+        policy.DeliveryFor(EventDeliveryMode.StreamAndLog).Should().Be(EventDeliveryMode.LogOnly);
+        policy.IsLogOnly.Should().BeTrue();
+    }
+
+    [Fact]
+    public void A_stream_only_event_stays_stream_only_under_a_log_only_workflow()
+    {
+        var policy = new NotificationPolicy { Delivery = EventDeliveryMode.LogOnly };
+
+        policy.DeliveryFor(EventDeliveryMode.StreamOnly).Should()
+            .Be(EventDeliveryMode.StreamOnly,
+                "it is the caller's job to drop it — a log-only workflow has opted out of streamed tokens");
+    }
+
+    [Fact]
+    public void A_streaming_workflow_leaves_delivery_alone()
+    {
+        var policy = new NotificationPolicy { Delivery = EventDeliveryMode.StreamAndLog };
+
+        policy.DeliveryFor(EventDeliveryMode.StreamAndLog).Should().Be(EventDeliveryMode.StreamAndLog);
+        policy.DeliveryFor(EventDeliveryMode.StreamOnly).Should().Be(EventDeliveryMode.StreamOnly);
+    }
+
+    [Fact]
+    public void A_workflow_may_not_declare_stream_only_delivery()
+    {
+        var policy = new NotificationPolicy { Delivery = EventDeliveryMode.StreamOnly };
+
+        Action validate = () => policy.Validate("my-workflow");
+
+        validate.Should().Throw<InvalidOperationException>(
+            "it would leave the run with no durable event record at all");
+    }
+
+    [Fact]
     public void Declared_names_are_validated_at_composition_time()
     {
         var policy = new NotificationPolicy { Emits = ["ok.name", "bad name"] };
@@ -195,6 +241,31 @@ public class NodeNotifierTests
     }
 
     [Fact]
+    public async Task A_log_only_workflow_still_writes_a_full_durable_record()
+    {
+        var store = new InMemoryEventStore();
+        using var bus = new Abacus.Run.Api.InMemoryEventBus();
+        var sequencer = new EventSequencer();
+        var notifier = new NodeNotifier(
+            "i1", null, "node-a", new DirectEventSink(store, bus), sequencer,
+            new NotificationPolicy { Delivery = EventDeliveryMode.LogOnly },
+            () => 1, TimeProvider.System, "my-workflow");
+
+        await notifier.NotifyAsync("thing.happened", new { }, default);
+
+        var events = new List<EventEnvelope>();
+        await foreach (EventEnvelope e in store.ReadAsync("i1", 0, default))
+        {
+            events.Add(e);
+        }
+
+        EventEnvelope logged = events.Should().ContainSingle().Subject;
+        logged.Delivery.Should().Be(EventDeliveryMode.LogOnly);
+        logged.Sequence.Should().Be(1, "log-only events are still sequenced; only the stream is skipped");
+        logged.WorkflowName.Should().Be("my-workflow");
+    }
+
+    [Fact]
     public async Task A_reserved_type_can_only_be_emitted_through_the_framework_path()
     {
         (NodeNotifier notifier, InMemoryEventStore store, _) = Build();
@@ -216,7 +287,7 @@ public class NodeNotifierTests
     }
 
     [Fact]
-    public async Task A_transient_event_reaches_the_bus_but_not_the_store()
+    public async Task A_stream_only_event_reaches_the_bus_but_not_the_store()
     {
         var store = new InMemoryEventStore();
         using var bus = new Abacus.Run.Api.InMemoryEventBus();
@@ -247,7 +318,7 @@ public class NodeNotifierTests
 
         lock (received)
         {
-            received.Should().ContainSingle().Which.Transient.Should().BeTrue();
+            received.Should().ContainSingle().Which.IsStreamOnly.Should().BeTrue();
         }
 
         (await ReadAsync(store)).Should()
