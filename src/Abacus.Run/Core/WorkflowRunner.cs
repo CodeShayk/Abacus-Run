@@ -510,7 +510,7 @@ public sealed class WorkflowRunner
             EventFactory.Create(
                 instance.InstanceId, _deps.Sequencer.Next(instance.InstanceId), eventType, payload,
                 executorId, _currentSuperstep, instance.TenantId, _deps.Clock.GetUtcNow(),
-                instance.WorkflowName, _notifications.Delivery),
+                instance.WorkflowName, _notifications.DeliveryFor(EventDeliveryMode.StreamAndLog)),
             cancellationToken);
     }
 

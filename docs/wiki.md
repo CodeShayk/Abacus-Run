@@ -753,29 +753,44 @@ public sealed class BulkWorkflow : IWorkflowDefinition<Ctx, Result>, INotifyingW
 
 ### Turning SSE off for a workflow
 
-Level controls *what* is emitted. `Delivery` controls *where it goes*, and the default is both the durable log and the live stream:
+`Level` controls *what* is emitted. `StreamEvents` controls whether it is also streamed live.
+
+**The event log is not optional.** Every event a workflow emits is written to the durable log, and no
+setting turns that off. The only delivery choice a workflow has is whether those same events are
+*also* pushed to SSE subscribers as they happen:
 
 ```csharp
 public NotificationPolicy Notifications { get; } = new()
 {
-    Delivery = EventDeliveryMode.LogOnly   // record everything; stream nothing
+    StreamEvents = false   // still logged in full; simply not streamed
 };
 ```
 
-| Mode | Durable log | Live stream |
+| `StreamEvents` | Durable log | Live SSE |
 | --- | --- | --- |
-| `StreamAndLog` *(default)* | Yes | Yes |
-| `LogOnly` | Yes | No |
-| `StreamOnly` | No | Yes — individual events only, not a workflow-level choice |
+| `true` *(default)* | Always | Yes |
+| `false` | Always | No |
 
-`LogOnly` suits a run nobody watches as it happens — a nightly batch, or work whose events are read afterwards for reconciliation. The run stays fully observable; only the timing changes. Events are still sequenced, still redacted, still carry the workflow name, and are read at `GET /v2/workflows/{name}/instances/{id}/events`.
+Turning it off suits a run nobody watches as it happens — a nightly batch, or work whose events are
+read afterwards for reconciliation. Observability is not reduced, only its timeliness: events are
+still sequenced, still redacted, still carry the workflow name, and are read in full at
+`GET /v2/workflows/{name}/instances/{id}/events`.
 
 Two consequences worth knowing:
 
-- **The SSE endpoint refuses.** `GET /instances/{id}/events` returns `409` with a problem detail pointing at the v2 route, rather than holding a stream open that will never produce anything. An empty stream is indistinguishable from a stalled run, and a client waiting on one has no way to tell.
-- **Streamed tokens disappear entirely.** `llm.delta` is stream-only and is never written to the log, so a log-only workflow produces none. That is the correct reading — a workflow that has opted out of streaming has opted out of streamed tokens too — but it does mean `StreamDeltas` and `LogOnly` together is a contradiction the runtime resolves in favour of `LogOnly`.
+- **The SSE endpoint refuses.** `GET /instances/{id}/events` returns `409` with a problem detail
+  pointing at the v2 route, rather than holding a stream open that will never produce anything. An
+  empty stream is indistinguishable from a stalled run, and a client waiting on one has no way to
+  tell.
+- **Streamed tokens disappear entirely.** `llm.delta` is the one kind of event with no durable record
+  by design — a rendered token has no replay value — so with streaming off it has nowhere left to go.
+  That is the correct reading, a workflow that has opted out of streaming has opted out of streamed
+  tokens too, but it does make `StreamDeltas = true` alongside `StreamEvents = false` a combination
+  that produces no deltas anywhere.
 
-`StreamOnly` is rejected at startup as a workflow-level choice: it would leave the run with no durable record at all, which is a different feature from the one being asked for and almost certainly a mistake.
+`EventDeliveryMode` appears on `EventEnvelope` as the runtime's own record of where a given event
+went. It is not a menu a workflow picks from — a workflow sets `StreamEvents`, and the runtime
+derives the rest.
 
 Two rules keep the policy safe. **Terminal events are never suppressible** — a subscriber's stream closes on `workflow.terminated`, and `approval.*`, `instance.*` and `event.*` are control-plane and broker facts rather than run chatter. And **filtering happens before the sequence number is taken**: a suppressed event that had consumed one would leave a hole in the gapless sequence, and `Last-Event-ID` catch-up would wait forever for an event that is never coming.
 
@@ -1513,11 +1528,15 @@ A wait with no `timeout` waits forever by design. Set one, with `WaitExpiryActio
 
 They are not stored, by design. Streamed tokens are stream-only: live fan-out, no sequence number, no durable row. Subscribe to `GET /instances/{id}/events` to see them; `GET /instances/{id}/events/history` will never return them.
 
-If none arrive on the live stream either, check whether the workflow declares `Delivery = LogOnly`. A stream-only event under a log-only workflow goes nowhere at all — which is the intended reading, not a bug, but it does make `StreamDeltas` and `LogOnly` a combination that produces no tokens anywhere.
+If none arrive on the live stream either, check whether the workflow sets `StreamEvents = false`. Deltas are the one kind of event with no durable record by design, so with streaming off they have nowhere left to go — intended, not a bug, but it does make `StreamDeltas = true` alongside `StreamEvents = false` a combination that produces no tokens anywhere.
 
 ### The SSE endpoint returns 409
 
-The workflow declares `Delivery = EventDeliveryMode.LogOnly`, so it never streams. Read its events at `GET /v2/workflows/{name}/instances/{id}/events` instead — the problem detail carries the exact URL. This is deliberate: an empty stream held open is indistinguishable from a stalled run, so the endpoint refuses rather than misleading a client into waiting.
+The workflow sets `StreamEvents = false`, so it never streams. Its events are all still recorded — read them at `GET /v2/workflows/{name}/instances/{id}/events`, the URL the problem detail carries. This is deliberate: an empty stream held open is indistinguishable from a stalled run, so the endpoint refuses rather than misleading a client into waiting.
+
+### Can a workflow turn off event logging?
+
+No, and there is no setting that does it. `StreamEvents` switches the live stream only; every event a workflow emits is written to the durable log regardless. `NotificationLevel` can reduce *which* events are emitted at all — a `Minimal` workflow emits fewer — but whatever is emitted is always recorded.
 
 Also confirm `LlmOptions.StreamDeltas` is set on that node — it defaults to `false`, so no deltas are produced at all unless the definition asked for them.
 

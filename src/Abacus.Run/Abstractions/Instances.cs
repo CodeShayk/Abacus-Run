@@ -116,17 +116,23 @@ public sealed record EventEnvelope
 }
 
 /// <summary>
-/// Where an event is delivered. One enum rather than a pair of booleans, because "neither" is not a
+/// Where one event is delivered. One enum rather than a pair of booleans, because "neither" is not a
 /// meaningful destination and should not be representable.
 /// </summary>
+/// <remarks>
+/// This is the runtime's own view of a single envelope, not a menu a workflow picks from. A workflow
+/// switches the live stream on or off through <c>NotificationPolicy.StreamEvents</c>; the durable
+/// log is unconditional for every event that has one, and nothing a workflow can declare turns it
+/// off.
+/// </remarks>
 public enum EventDeliveryMode
 {
     /// <summary>Appended to the durable log and fanned out to live subscribers. The default.</summary>
     StreamAndLog,
 
     /// <summary>
-    /// Appended to the durable log only. For a workflow that wants a queryable event record without
-    /// a live stream — the run is still fully observable after the fact, just not as it happens.
+    /// Appended to the durable log, with no live fan-out. What every ordinary event becomes when its
+    /// workflow has turned streaming off — the record is unchanged, only its timeliness.
     /// </summary>
     LogOnly,
 

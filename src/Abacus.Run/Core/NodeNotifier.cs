@@ -151,30 +151,29 @@ public sealed record NotificationPolicy
     public NotificationLevel Level { get; init; } = NotificationLevel.Standard;
 
     /// <summary>
-    /// Whether this workflow's events reach live subscribers as well as the durable log.
+    /// Whether this workflow's events also reach live SSE subscribers. Defaults to true.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <see cref="EventDeliveryMode.StreamAndLog"/> is the default and the ordinary case. A workflow
-    /// sets <see cref="EventDeliveryMode.LogOnly"/> when it wants a queryable record of what
-    /// happened without paying for live fan-out — a nightly batch nobody watches, or a run whose
-    /// events are read afterwards rather than followed.
+    /// This is the only delivery knob a workflow has, and it switches one thing: the live stream.
+    /// <strong>The durable event log is not optional and cannot be turned off.</strong> Every event
+    /// this workflow emits is written to the log whatever this is set to — the run is always
+    /// reconstructable afterwards, and no configuration can make it otherwise.
     /// </para>
     /// <para>
-    /// The run stays fully observable either way; only the timing changes. Read a log-only
-    /// workflow's events at <c>GET /v2/workflows/{name}/instances/{id}/events</c>. Its SSE endpoint
-    /// refuses rather than holding open a stream that will never produce anything, because a
-    /// silently empty stream is indistinguishable from a stalled run.
+    /// Setting it false suits a run nobody watches as it happens: a nightly batch, or work whose
+    /// events are read afterwards for reconciliation. Only the timing of observability changes, not
+    /// whether it exists. Read the log at <c>GET /v2/workflows/{name}/instances/{id}/events</c>.
     /// </para>
     /// <para>
-    /// <see cref="EventDeliveryMode.StreamOnly"/> is not a valid workflow-level choice — it belongs
-    /// to individual events with no replay value, not to a whole run.
+    /// The SSE endpoint then refuses rather than holding open a stream that will never produce
+    /// anything, because a silently empty stream is indistinguishable from a stalled run.
     /// </para>
     /// </remarks>
-    public EventDeliveryMode Delivery { get; init; } = EventDeliveryMode.StreamAndLog;
+    public bool StreamEvents { get; init; } = true;
 
-    /// <summary>True when this workflow has opted out of live streaming.</summary>
-    public bool IsLogOnly => Delivery == EventDeliveryMode.LogOnly;
+    /// <summary>True when this workflow has opted out of live streaming. The log is unaffected.</summary>
+    public bool IsLogOnly => !StreamEvents;
 
     /// <summary>Per-executor overrides: quiet a chatty fan-out, keep the interesting node loud.</summary>
     public IReadOnlyDictionary<string, NotificationLevel> ByNode { get; init; } =
@@ -229,23 +228,23 @@ public sealed record NotificationPolicy
         || eventType.StartsWith("event.", StringComparison.Ordinal);
 
     /// <summary>
-    /// Resolves the delivery mode for one event. A stream-only event stays stream-only under a
-    /// log-only workflow — which means it goes nowhere, and that is the correct reading: a workflow
-    /// that has opted out of streaming has opted out of streamed tokens too.
+    /// Resolves where one event goes. Anything durable is logged unconditionally and only loses the
+    /// stream; <see cref="EventDeliveryMode.StreamOnly"/> is a framework-internal mode for events
+    /// with no replay value, and a workflow cannot ask for it.
     /// </summary>
+    /// <remarks>
+    /// A stream-only event under a non-streaming workflow goes nowhere, and that is the correct
+    /// reading: a workflow that has opted out of streaming has opted out of streamed tokens too. It
+    /// costs no durable record, because a stream-only event never had one.
+    /// </remarks>
     public EventDeliveryMode DeliveryFor(EventDeliveryMode requested)
-        => requested == EventDeliveryMode.StreamOnly ? requested : Delivery;
+        => requested == EventDeliveryMode.StreamOnly
+            ? EventDeliveryMode.StreamOnly
+            : StreamEvents ? EventDeliveryMode.StreamAndLog : EventDeliveryMode.LogOnly;
 
-    /// <summary>Validates declared names and the delivery choice at composition time.</summary>
+    /// <summary>Validates declared names at composition time, so a bad one fails startup.</summary>
     public void Validate(string workflowName)
     {
-        if (Delivery == EventDeliveryMode.StreamOnly)
-        {
-            throw new InvalidOperationException(
-                $"Workflow '{workflowName}' declares {nameof(EventDeliveryMode.StreamOnly)} delivery, which would " +
-                "leave the run with no durable event record at all. Use StreamAndLog or LogOnly.");
-        }
-
         foreach (string name in Emits)
         {
             try

@@ -352,25 +352,27 @@ A definition controls what its runs emit by implementing `INotifyingWorkflow` �
 for the catalog API. Terminal events are never suppressible, and filtering happens before a sequence
 number is taken, so the gapless sequence that `Last-Event-ID` catch-up depends on stays intact.
 
-The same policy decides *where* events go. The default is both the durable log and the live stream; a
-workflow nobody watches as it happens can keep the record and drop the stream:
+**The event log is not optional.** Every event a workflow emits is written to the durable log, and no
+setting turns that off. The one delivery choice a workflow has is whether those same events are
+*also* streamed live to SSE subscribers:
 
 ```csharp
 public NotificationPolicy Notifications { get; } = new()
 {
-    Delivery = EventDeliveryMode.LogOnly
+    StreamEvents = false   // still logged in full; simply not streamed
 };
 ```
 
-| Mode | Durable log | Live stream |
+| `StreamEvents` | Durable log | Live SSE |
 | --- | --- | --- |
-| `StreamAndLog` *(default)* | Yes | Yes |
-| `LogOnly` | Yes | No |
+| `true` *(default)* | Always | Yes |
+| `false` | Always | No |
 
-A log-only run stays fully observable — events are still sequenced, redacted, and carry the workflow
-name — and are read at `GET /v2/workflows/{name}/instances/{id}/events`. Its SSE endpoint returns
-`409` pointing at that route rather than holding open a stream that will never produce anything,
-because an empty stream is indistinguishable from a stalled run.
+Observability is not reduced by turning it off, only its timeliness — events are still sequenced,
+redacted, and carry the workflow name, and are read in full at
+`GET /v2/workflows/{name}/instances/{id}/events`. The SSE endpoint then returns `409` pointing at
+that route rather than holding open a stream that will never produce anything, because an empty
+stream is indistinguishable from a stalled run.
 
 An `LlmExecutor` emits one `llm.completed` per call carrying model, prompt version, tokens, cost,
 latency and finish reason. Streamed tokens (`llm.delta`, opt-in per node via `StreamDeltas`) are

@@ -169,7 +169,7 @@ public sealed class LogOnlyWorkflow : IWorkflowDefinition<ClassifyContext, Class
     public string Name => "log-only";
     public string Version => "1.0.0";
 
-    public NotificationPolicy Notifications { get; } = new() { Delivery = EventDeliveryMode.LogOnly };
+    public NotificationPolicy Notifications { get; } = new() { StreamEvents = false };
 
     public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken cancellationToken)
     {

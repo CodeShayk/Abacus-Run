@@ -90,49 +90,59 @@ public class NotificationPolicyTests
     }
 
     [Fact]
-    public void Delivery_defaults_to_streaming_and_logging()
+    public void Streaming_is_on_by_default()
     {
-        NotificationPolicy.Default.Delivery.Should().Be(EventDeliveryMode.StreamAndLog);
+        NotificationPolicy.Default.StreamEvents.Should().BeTrue();
         NotificationPolicy.Default.IsLogOnly.Should().BeFalse();
     }
 
     [Fact]
-    public void A_log_only_workflow_downgrades_ordinary_events()
+    public void Turning_streaming_off_leaves_the_event_logged()
     {
-        var policy = new NotificationPolicy { Delivery = EventDeliveryMode.LogOnly };
+        var policy = new NotificationPolicy { StreamEvents = false };
 
-        policy.DeliveryFor(EventDeliveryMode.StreamAndLog).Should().Be(EventDeliveryMode.LogOnly);
+        policy.DeliveryFor(EventDeliveryMode.StreamAndLog).Should()
+            .Be(EventDeliveryMode.LogOnly, "the log is unconditional; only the stream is switchable");
+
         policy.IsLogOnly.Should().BeTrue();
     }
 
-    [Fact]
-    public void A_stream_only_event_stays_stream_only_under_a_log_only_workflow()
+    /// <summary>
+    /// The invariant the whole feature rests on: there is no combination of policy settings that
+    /// stops an ordinary event being written to the durable log.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void No_policy_can_stop_an_ordinary_event_being_logged(bool streamEvents)
     {
-        var policy = new NotificationPolicy { Delivery = EventDeliveryMode.LogOnly };
+        var policy = new NotificationPolicy
+        {
+            StreamEvents = streamEvents,
+            Level = NotificationLevel.Minimal
+        };
+
+        policy.DeliveryFor(EventDeliveryMode.StreamAndLog).Should()
+            .NotBe(EventDeliveryMode.StreamOnly, "a workflow cannot opt out of its own event record");
+    }
+
+    [Fact]
+    public void A_stream_only_event_stays_stream_only_when_streaming_is_off()
+    {
+        var policy = new NotificationPolicy { StreamEvents = false };
 
         policy.DeliveryFor(EventDeliveryMode.StreamOnly).Should()
             .Be(EventDeliveryMode.StreamOnly,
-                "it is the caller's job to drop it — a log-only workflow has opted out of streamed tokens");
+                "a stream-only event never had a durable record to lose; it simply goes nowhere");
     }
 
     [Fact]
     public void A_streaming_workflow_leaves_delivery_alone()
     {
-        var policy = new NotificationPolicy { Delivery = EventDeliveryMode.StreamAndLog };
+        var policy = new NotificationPolicy { StreamEvents = true };
 
         policy.DeliveryFor(EventDeliveryMode.StreamAndLog).Should().Be(EventDeliveryMode.StreamAndLog);
         policy.DeliveryFor(EventDeliveryMode.StreamOnly).Should().Be(EventDeliveryMode.StreamOnly);
-    }
-
-    [Fact]
-    public void A_workflow_may_not_declare_stream_only_delivery()
-    {
-        var policy = new NotificationPolicy { Delivery = EventDeliveryMode.StreamOnly };
-
-        Action validate = () => policy.Validate("my-workflow");
-
-        validate.Should().Throw<InvalidOperationException>(
-            "it would leave the run with no durable event record at all");
     }
 
     [Fact]
@@ -248,7 +258,7 @@ public class NodeNotifierTests
         var sequencer = new EventSequencer();
         var notifier = new NodeNotifier(
             "i1", null, "node-a", new DirectEventSink(store, bus), sequencer,
-            new NotificationPolicy { Delivery = EventDeliveryMode.LogOnly },
+            new NotificationPolicy { StreamEvents = false },
             () => 1, TimeProvider.System, "my-workflow");
 
         await notifier.NotifyAsync("thing.happened", new { }, default);
