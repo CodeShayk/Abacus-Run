@@ -17,9 +17,14 @@ public static class Sse
         ArgumentNullException.ThrowIfNull(response);
         ArgumentNullException.ThrowIfNull(envelope);
 
-        await response.WriteAsync(
-            $"event: {envelope.EventType}\nid: {envelope.Sequence}\ndata: {envelope.PayloadJson}\n\n",
-            cancellationToken).ConfigureAwait(false);
+        // A stream-only event carries no sequence number, so it is written without an id. That leaves
+        // the client's Last-Event-ID pinned to the last durable event, which is what stops a
+        // reconnect waiting for a chunk that no longer exists — a token stream is not resumable.
+        string frame = envelope.IsStreamOnly
+            ? $"event: {envelope.EventType}\ndata: {envelope.PayloadJson}\n\n"
+            : $"event: {envelope.EventType}\nid: {envelope.Sequence}\ndata: {envelope.PayloadJson}\n\n";
+
+        await response.WriteAsync(frame, cancellationToken).ConfigureAwait(false);
 
         await response.Body.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -106,13 +111,19 @@ public static class Sse
 
                 while (buffer.Reader.TryRead(out EventEnvelope? envelope))
                 {
-                    if (envelope.Sequence <= lastSequence)
+                    // Stream-only events are exempt from sequence de-duplication: they have no
+                    // sequence to compare, and they were never in the backfill to be duplicated.
+                    if (!envelope.IsStreamOnly && envelope.Sequence <= lastSequence)
                     {
                         continue;   // already delivered during backfill
                     }
 
                     await WriteEventAsync(http.Response, envelope, cancellationToken).ConfigureAwait(false);
-                    lastSequence = envelope.Sequence;
+
+                    if (!envelope.IsStreamOnly)
+                    {
+                        lastSequence = envelope.Sequence;
+                    }
 
                     if (envelope.EventType == WorkflowEventTypes.WorkflowTerminated)
                     {

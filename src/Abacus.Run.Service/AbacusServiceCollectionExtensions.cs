@@ -18,6 +18,18 @@ public sealed class AbacusServiceOptions
     public bool EnsureDatabaseCreated { get; set; }
 
     public int RedisMaxStreamLength { get; set; } = 10_000;
+
+    /// <summary>
+    /// Approximate retention for the cross-service broker stream. Larger than the per-instance event
+    /// streams because one stream carries every topic for the whole deployment.
+    /// </summary>
+    public int RedisMaxBrokerStreamLength { get; set; } = 100_000;
+
+    /// <summary>
+    /// When set, RabbitMQ carries the cross-service event broker instead of Redis Streams. Redis, if
+    /// also configured, still carries the SSE event bus — the two are separate concerns.
+    /// </summary>
+    public string? RabbitMqConnectionString { get; set; }
 }
 
 /// <summary>
@@ -47,7 +59,9 @@ public static class AbacusServiceCollectionExtensions
                 ?? configuration.GetConnectionString("Abacus"),
             RedisConnectionString = configuration["Abacus:Redis:ConnectionString"],
             EnsureDatabaseCreated = configuration.GetValue("Abacus:SqlServer:EnsureDatabaseCreated", false),
-            RedisMaxStreamLength = configuration.GetValue("Abacus:Redis:MaxStreamLength", 10_000)
+            RedisMaxStreamLength = configuration.GetValue("Abacus:Redis:MaxStreamLength", 10_000),
+            RedisMaxBrokerStreamLength = configuration.GetValue("Abacus:Redis:MaxBrokerStreamLength", 100_000),
+            RabbitMqConnectionString = configuration["Abacus:RabbitMq:ConnectionString"]
         };
         configure?.Invoke(options);
 
@@ -69,6 +83,14 @@ public static class AbacusServiceCollectionExtensions
         if (!string.IsNullOrWhiteSpace(options.RedisConnectionString))
         {
             services.AddRedisEventBus(options.RedisConnectionString, options.RedisMaxStreamLength);
+            services.AddRedisEventBroker(options.RedisConnectionString, options.RedisMaxBrokerStreamLength);
+        }
+
+        // Registered after Redis on purpose: naming RabbitMQ explicitly is a choice of broker, and
+        // it replaces whatever came before. The Redis event bus, a separate concern, stays put.
+        if (!string.IsNullOrWhiteSpace(options.RabbitMqConnectionString))
+        {
+            services.AddRabbitMqEventBroker(options.RabbitMqConnectionString);
         }
 
         return host;

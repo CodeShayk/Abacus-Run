@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using Abacus.Run.Abstractions;
+using Abacus.Run.Api;
 using Abacus.Run.Core;
 
 namespace Abacus.Run.Service.ControlPlane.Services;
@@ -69,6 +70,31 @@ public sealed class WorkflowApiClient
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<Page<EventEnvelope>>(Json, ct).ConfigureAwait(false))!;
     }
+
+    // ─── Event subscriptions ─────────────────────────────────────────────
+
+    /// <summary>
+    /// What this instance is waiting for. An instance parked on an event shows only as
+    /// <c>AwaitingInput</c> otherwise, which tells an operator nothing about why.
+    /// </summary>
+    public async Task<IReadOnlyList<SubscriptionDto>> GetSubscriptionsAsync(
+        string instanceId, CancellationToken ct = default)
+    {
+        HttpResponseMessage response = await _http
+            .GetAsync($"/subscriptions?instanceId={instanceId}&pendingOnly=true", ct).ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return [];
+        }
+
+        SubscriptionListResponse? list = await response.Content
+            .ReadFromJsonAsync<SubscriptionListResponse>(Json, ct).ConfigureAwait(false);
+
+        return list?.Items ?? [];
+    }
+
+    private sealed record SubscriptionListResponse(IReadOnlyList<SubscriptionDto> Items);
 
     // ─── Graph ───────────────────────────────────────────────────────────
 

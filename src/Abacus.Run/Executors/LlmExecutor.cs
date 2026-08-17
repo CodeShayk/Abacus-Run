@@ -13,7 +13,13 @@ public sealed record LlmResult(
     long? InputTokens,
     long? OutputTokens,
     string? ModelId,
-    string? FinishReason);
+    string? FinishReason)
+{
+    /// <summary>Null when the model has no configured price — absent, not free.</summary>
+    public decimal? CostUsd { get; init; }
+
+    public TimeSpan Elapsed { get; init; }
+}
 
 public sealed class LlmOptions
 {
@@ -26,6 +32,12 @@ public sealed class LlmOptions
     public int? MaxTokens { get; set; }
     public bool StreamDeltas { get; set; }
     public int MaxReparseAttempts { get; set; } = 2;
+
+    /// <summary>
+    /// Emit one <c>llm.completed</c> per invocation carrying model, tokens, cost and latency.
+    /// On by default: the cost of a model call is something a consumer of the run should see.
+    /// </summary>
+    public bool EmitCompletion { get; set; } = true;
 }
 
 /// <summary>
@@ -36,12 +48,18 @@ public sealed class LlmExecutor : HostExecutor<object, LlmResult>
 {
     private readonly LlmOptions _options;
     private readonly Func<string, IChatClient> _clientResolver;
+    private readonly IModelPricing? _pricing;
 
-    public LlmExecutor(string id, LlmOptions options, Func<string, IChatClient> clientResolver)
+    public LlmExecutor(
+        string id,
+        LlmOptions options,
+        Func<string, IChatClient> clientResolver,
+        IModelPricing? pricing = null)
         : base(id)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _clientResolver = clientResolver ?? throw new ArgumentNullException(nameof(clientResolver));
+        _pricing = pricing;
     }
 
     public override IReadOnlyDictionary<string, object?> Metadata => new Dictionary<string, object?>
@@ -71,23 +89,78 @@ public sealed class LlmExecutor : HostExecutor<object, LlmResult>
             MaxOutputTokens = _options.MaxTokens
         };
 
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
+
         ChatResponse response = _options.StreamDeltas
             ? await StreamAsync(client, messages, chatOptions, context, cancellationToken).ConfigureAwait(false)
             : await client.GetResponseAsync(messages, chatOptions, cancellationToken).ConfigureAwait(false);
 
+        TimeSpan elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(start);
         string text = response.Text ?? string.Empty;
 
         object? value = _options.StructuredOutput is null
             ? text
             : StructuredOutputParser.Parse(text, _options.StructuredOutput, _options.MaxReparseAttempts);
 
-        return new LlmResult(
-            value,
-            text,
-            response.Usage?.InputTokenCount,
-            response.Usage?.OutputTokenCount,
-            response.ModelId ?? _options.Model,
-            response.FinishReason?.ToString());
+        long? inputTokens = response.Usage?.InputTokenCount;
+        long? outputTokens = response.Usage?.OutputTokenCount;
+        string modelId = response.ModelId ?? _options.Model;
+
+        decimal? cost = _pricing?.CostOf(modelId, inputTokens ?? 0, outputTokens ?? 0);
+
+        var result = new LlmResult(
+            value, text, inputTokens, outputTokens, modelId, response.FinishReason?.ToString())
+        {
+            CostUsd = cost,
+            Elapsed = elapsed
+        };
+
+        await ReportAsync(result, cancellationToken).ConfigureAwait(false);
+        return result;
+    }
+
+    /// <summary>
+    /// One event and one log entry per call. The prompt and the response text are deliberately
+    /// absent from both: they already travel the executor's input/output path where redaction
+    /// applies, and repeating them here would put model output on a stream a UI reads.
+    /// </summary>
+    private async ValueTask ReportAsync(LlmResult result, CancellationToken cancellationToken)
+    {
+        if (_options.EmitCompletion && Runtime.Notify is { } notify)
+        {
+            await notify.EmitReservedAsync(WorkflowEventTypes.LlmCompleted, new
+            {
+                executorId = Id,
+                model = result.ModelId,
+                promptVersion = _options.PromptVersion,
+                inputTokens = result.InputTokens,
+                outputTokens = result.OutputTokens,
+                costUsd = result.CostUsd,
+                elapsedMs = (long)result.Elapsed.TotalMilliseconds,
+                finishReason = result.FinishReason,
+                attempt = Runtime.Attempt,
+                streamed = _options.StreamDeltas
+            }, transient: false, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Metrics give the aggregate; this makes the same numbers queryable per instance, next to
+        // everything else that instance did.
+        if (Runtime.Services?.GetService(typeof(ILogStore)) is ILogStore logs)
+        {
+            await logs.AppendAsync(new InstanceLogEntry
+            {
+                InstanceId = Runtime.InstanceId,
+                Sequence = 0,
+                Level = "Information",
+                ExecutorId = Id,
+                Superstep = Runtime.CurrentSuperstep,
+                Message =
+                    $"llm usage model={result.ModelId} in={result.InputTokens} out={result.OutputTokens} " +
+                    $"cost={(result.CostUsd is { } c ? c.ToString("F6") : "unpriced")} " +
+                    $"ms={(long)result.Elapsed.TotalMilliseconds} finish={result.FinishReason}",
+                LoggedAt = DateTimeOffset.UtcNow
+            }, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private async Task<ChatResponse> StreamAsync(
@@ -116,18 +189,6 @@ public sealed class LlmExecutor : HostExecutor<object, LlmResult>
     }
 }
 
-/// <summary>Streaming token event, carried on the normal workflow event stream.</summary>
-public sealed class LlmDeltaWorkflowEvent : WorkflowEvent
-{
-    public LlmDeltaWorkflowEvent(string executorId, string delta) : base(delta)
-    {
-        ExecutorId = executorId;
-        Delta = delta;
-    }
-
-    public string ExecutorId { get; }
-    public string Delta { get; }
-}
 
 public static class StructuredOutputParser
 {

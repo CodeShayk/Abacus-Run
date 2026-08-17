@@ -101,6 +101,73 @@ public sealed record EventEnvelope
     public required string PayloadJson { get; init; }
     public string? TraceId { get; init; }
     public required DateTimeOffset OccurredAt { get; init; }
+
+    /// <summary>
+    /// The workflow this instance is running. Denormalised onto the event so the log can be read and
+    /// filtered by workflow without joining back to the instance row.
+    /// </summary>
+    public string? WorkflowName { get; init; }
+
+    /// <summary>Where this event goes: the durable log, live subscribers, or both.</summary>
+    public EventDeliveryMode Delivery { get; init; } = EventDeliveryMode.StreamAndLog;
+
+    /// <summary>True when the event carries no sequence number and leaves no durable record.</summary>
+    public bool IsStreamOnly => Delivery == EventDeliveryMode.StreamOnly;
+}
+
+/// <summary>
+/// Where one event is delivered. One enum rather than a pair of booleans, because "neither" is not a
+/// meaningful destination and should not be representable.
+/// </summary>
+/// <remarks>
+/// This is the runtime's own view of a single envelope, not a menu a workflow picks from. A workflow
+/// switches the live stream on or off through <c>NotificationPolicy.StreamEvents</c>; the durable
+/// log is unconditional for every event that has one, and nothing a workflow can declare turns it
+/// off.
+/// </remarks>
+public enum EventDeliveryMode
+{
+    /// <summary>Appended to the durable log and fanned out to live subscribers. The default.</summary>
+    StreamAndLog,
+
+    /// <summary>
+    /// Appended to the durable log, with no live fan-out. What every ordinary event becomes when its
+    /// workflow has turned streaming off — the record is unchanged, only its timeliness.
+    /// </summary>
+    LogOnly,
+
+    /// <summary>
+    /// Fanned out to live subscribers only, carrying no sequence number and leaving no record.
+    /// </summary>
+    /// <remarks>
+    /// For data with no replay value — streamed LLM tokens, where the complete text is in the
+    /// executor's output anyway. Taking no sequence number keeps the durable sequence gapless so
+    /// <c>Last-Event-ID</c> catch-up still works, and the event is written to SSE without an
+    /// <c>id:</c> field, which stops a reconnecting client waiting for a chunk that no longer exists.
+    /// A token stream is not resumable and the transport should say so.
+    /// </remarks>
+    StreamOnly
+}
+
+/// <summary>
+/// Streaming token event, carried on the engine's own event stream so it stays ordered with the
+/// executor events around it.
+/// </summary>
+/// <remarks>
+/// Lives here rather than beside <c>LlmExecutor</c> because the runner has to translate it, and
+/// <c>Core</c> does not reference <c>Executors</c>. Translated to a transient
+/// <see cref="WorkflowEventTypes.LlmDelta"/> — live fan-out, never stored.
+/// </remarks>
+public sealed class LlmDeltaWorkflowEvent : Microsoft.Agents.AI.Workflows.WorkflowEvent
+{
+    public LlmDeltaWorkflowEvent(string executorId, string delta) : base(delta)
+    {
+        ExecutorId = executorId;
+        Delta = delta;
+    }
+
+    public string ExecutorId { get; }
+    public string Delta { get; }
 }
 
 public static class WorkflowEventTypes
@@ -112,6 +179,9 @@ public static class WorkflowEventTypes
     public const string ExecutorCompleted = "executor.completed";
     public const string ExecutorFailed = "executor.failed";
     public const string LlmDelta = "llm.delta";
+
+    /// <summary>One per LLM invocation: model, tokens, cost, latency, finish reason.</summary>
+    public const string LlmCompleted = "llm.completed";
     public const string RequestPending = "request.pending";
     public const string ApprovalRequested = "approval.requested";
     public const string ApprovalDecided = "approval.decided";
@@ -125,6 +195,23 @@ public static class WorkflowEventTypes
     public const string InstanceResumed = "instance.resumed";
     public const string InstanceRetryForced = "instance.retry_forced";
     public const string Heartbeat = "heartbeat";
+
+    private static readonly HashSet<string> Reserved = new(StringComparer.Ordinal)
+    {
+        WorkflowStarted, SuperstepStarted, SuperstepCompleted,
+        ExecutorInvoked, ExecutorCompleted, ExecutorFailed,
+        LlmDelta, LlmCompleted, RequestPending,
+        ApprovalRequested, ApprovalDecided, ApprovalExpired,
+        WorkflowWarning, WorkflowOutput, WorkflowTerminated,
+        InstanceCancelled, InstanceRerunRequested, InstanceSuspended,
+        InstanceResumed, InstanceRetryForced, Heartbeat
+    };
+
+    /// <summary>
+    /// Whether the framework owns this event name. Workflow-defined events are always prefixed, so
+    /// the two namespaces cannot collide and a consumer can tell them apart without a lookup.
+    /// </summary>
+    public static bool IsReserved(string eventType) => Reserved.Contains(eventType);
 }
 
 public sealed record InstanceLogEntry

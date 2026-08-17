@@ -12,6 +12,11 @@ This page is the repository-level technical wiki. It documents the implementatio
 - [Project structure](#project-structure)
 - [Getting started](#getting-started)
 - [Authoring a workflow](#authoring-a-workflow)
+  - [What a definition can declare](#what-a-definition-can-declare)
+  - [Nodes](#nodes) · [Built-in executors](#built-in-executors) · [Custom executors](#custom-executors)
+  - [Edges](#edges) · [Approval gates on a node](#approval-gates-on-a-node) · [Events on a node](#events-on-a-node)
+  - [Failure classification](#failure-classification) · [Engine context](#engine-context-inside-an-executor) · [Middleware](#middleware)
+  - [A definition using all of it](#a-definition-using-all-of-it) · [Versioning rules](#versioning-rules-that-bite)
 - [Workflow audit records](#workflow-audit-records)
 - [Registering workflows and middleware](#registering-workflows-and-middleware)
 - [Instance lifecycle](#instance-lifecycle)
@@ -20,6 +25,7 @@ This page is the repository-level technical wiki. It documents the implementatio
 - [Human approval gates](#human-approval-gates)
 - [Tenant executor configuration](#tenant-executor-configuration)
 - [Events, history, and SSE](#events-history-and-sse)
+- [Event broker and event-driven workflows](#event-broker-and-event-driven-workflows)
 - [HTTP API](#http-api)
 - [Configuration](#configuration)
 - [Security and data handling](#security-and-data-handling)
@@ -29,6 +35,7 @@ This page is the repository-level technical wiki. It documents the implementatio
 - [Extension points](#extension-points)
 - [Design constraints](#design-constraints)
 - [Troubleshooting](#troubleshooting)
+- [Appendix: authoring variations](#appendix-authoring-variations)
 - [Related documents](#related-documents)
 
 ## At a glance
@@ -41,7 +48,8 @@ This page is the repository-level technical wiki. It documents the implementatio
 | Persistence | In-memory stores by default |
 | Checkpoint cadence | Superstep by default; `None`, `SuperStep`, and `Manual` are supported |
 | Ownership | Dispatcher and lease abstractions are used by the host; the default stores are process-local |
-| Events | Sequenced per-instance event store plus optional event bus and SSE relay |
+| Events | Sequenced per-instance event store plus optional event bus and SSE relay; nodes emit their own via `Runtime.Notify`, and a definition sets its emission policy |
+| Event broker | Topic pub/sub for event-driven pipelines: workflows start on a trigger or park on a wait. Local in-process by default; Redis Streams or RabbitMQ for cross-service |
 | Approvals | Durable approval contracts and in-memory coordinator/store, with decision and expiry handling |
 | Middleware | Workflow-level and host-executor-level pipelines |
 | Audit records | A workflow declares the shape of its own audit record; the runtime hands every node a recorder and stores entries generically |
@@ -64,6 +72,8 @@ The repository contains a working runtime, API host, control plane, built-in exe
 - `InMemoryBlobStore`
 - `OverflowCheckpointStore` over the blob abstraction
 - `InMemoryEventBus`
+- `InMemoryEventSubscriptionStore`
+- `InProcessEventBroker`
 
 The store interfaces are the substitution boundary for durable infrastructure. A production deployment must provide shared, durable implementations before relying on process loss recovery or multiple replicas.
 
@@ -278,17 +288,110 @@ public sealed class GreetingWorkflow : IWorkflowDefinition<GreetingContext, Gree
 }
 ```
 
-The exact graph construction methods depend on the Agent Framework graph shape. Common operations include adding edges, fan-out/fan-in barriers, conditions, and workflow output bindings.
+### What a definition can declare
 
-### Host executors
+`IWorkflowDefinition<TContext, TResult>` is the only required interface. Everything else is opt-in,
+so a workflow pays for nothing it does not ask for.
 
-Host executors derive from `HostExecutor<TIn, TOut>`. They implement `ExecuteCoreAsync`; the sealed `HandleAsync` method owns gate evaluation and the executor middleware pipeline.
+| Interface | Declares | Section |
+| --- | --- | --- |
+| `IWorkflowDefinition<TContext, TResult>` | Name, version, context/result types, the graph | this section |
+| `IAuditedWorkflowDefinition` | The shape of the workflow's own audit record | [Audit records](#workflow-audit-records) |
+| `IEventTriggeredWorkflow` | Topics that start an instance of this workflow | [Event broker](#event-broker-and-event-driven-workflows) |
+| `INotifyingWorkflow` | Emission level, per-node overrides, SSE on/off, custom event names | [Events](#events-history-and-sse) |
+
+Approval gates are not an interface — they are declared per node, inline in `BuildAsync`.
+
+`WorkflowBuildContext` is what `BuildAsync` receives, and carries the run's identity as well as the
+attachment methods:
+
+| Member | Purpose |
+| --- | --- |
+| `InstanceId`, `TenantId` | This run's identity — useful for closures the executors capture |
+| `WorkflowName`, `WorkflowVersion` | What the registry resolved |
+| `Attempt` | 1 on the first run, higher after a retry |
+| `Services` | The host's `IServiceProvider`; resolve brokers, clients, stores from it |
+| `Audit` | The recorder, when the definition declares an audit record |
+| `Node(executor, gate?)` | Attach a host executor, optionally gated |
+| `RawNode(binding)` | Attach a raw framework or agent binding |
+| `Gates`, `Nodes` | What this build declared; read by the runtime and the catalog API |
+
+`BuildAsync` is called **once per run attempt**, not once at startup, so it is free to resolve
+per-instance services or vary the graph by context. Keep it cheap and deterministic: the same
+instance rebuilding a different graph on resume will not match its own checkpoint.
+
+### Nodes
+
+`WorkflowBuildContext.Node(...)` attaches a host executor: it wires the middleware pipeline, the
+approval gate, the audit recorder and the per-instance runtime, and returns the `ExecutorBinding` the
+graph is built from.
 
 ```csharp
-public sealed class GreetingExecutor : HostExecutor<GreetingContext, GreetingResult>
-{
-    public GreetingExecutor(string id) : base(id) { }
+ExecutorBinding validate = context.Node(new Validate("validate"));
+```
 
+The **executor id** is the identity everything else hangs off: gate policies are keyed by it, node
+state is projected by it, per-node notification overrides name it, and the graph endpoint reports it.
+Renaming a node in a published version silently orphans any tenant policy written against the old id
+— change the workflow version instead.
+
+`RawNode(...)` is the escape hatch for bindings the host did not create. Raw nodes participate in the
+graph but run outside the executor middleware pipeline and **cannot be approval-gated** — passing a
+gate block to `RawNode` throws rather than silently ignoring it, because a gate that quietly did
+nothing would be worse than one that was refused.
+
+The framework supplies several ways to make a binding, and `ExecutorBinding` has implicit conversions
+from `Executor`, `AIAgent`, `RequestPort` and `string`:
+
+| Binding | From |
+| --- | --- |
+| `executor.BindExecutor()` | A raw framework `Executor` |
+| `agent.BindAsExecutor(id)` | An `AIAgent` — the agent becomes a node |
+| `workflow.BindAsExecutor(id)` | Another `Workflow`, as a **sub-workflow** node |
+| `handler.BindAsExecutor<TIn>(id)` | A bare `Func<TIn, IWorkflowContext, CancellationToken, ValueTask>` |
+
+Prefer `Node(...)` with a `HostExecutor<TIn, TOut>` whenever middleware, gates, audit or notifications
+are wanted — a raw node gets none of them.
+
+### Built-in executors
+
+| Executor | Shape | Purpose |
+| --- | --- | --- |
+| `TransformExecutor<TIn, TOut>` | `(id, Func<TIn, TOut>)` | Pure mapping |
+| `DelegateExecutor<TIn, TOut>` | `(id, handler)` | General-purpose async work |
+| `ApiCallExecutor` | `(id, ApiCallOptions, clientFactory)` | Templated HTTP call with egress control and idempotency key |
+| `LlmExecutor` | `(id, LlmOptions, clientResolver, pricing?)` | Chat model call with structured output, streaming and cost |
+| `DelayExecutor` | `(id, TimeSpan, ITimerService)` | Durable delay — checkpoints and halts rather than blocking |
+| `HumanApprovalExecutor<T>` | `(id)` | Approval as an explicit node rather than node configuration |
+| `FanInExecutor<TItem, TOut>` | `(id, aggregate)` | Aggregates a fan-in barrier's inputs |
+| `PublishEventExecutor<T>` | `(id, broker, topic, …)` | Publishes a domain message, passing input through |
+| `WaitForEventExecutor<TIn, TPayload>` | `(id, subscriptions, topicFilter, …)` | Parks until a matching message arrives |
+
+Three of them behave in ways worth knowing before you reach for them:
+
+- **`DelayExecutor` does not sleep.** It writes a timer row, checkpoints and halts, so the instance
+  releases its lease. A 24-hour delay costs no execution capacity, and survives a restart. It needs
+  an `ITimerService` from `context.Services`.
+- **`PublishEventExecutor<T>` passes its input through unchanged.** Publishing is a side effect on
+  the way past, so the node drops into an existing edge without rewiring the graph around it.
+- **`WaitForEventExecutor` runs twice.** The first pass registers a durable subscription and parks;
+  after delivery the runner resumes from the checkpoint, the executor runs again, finds its payload
+  and returns it. Anything it does before parking therefore happens twice — keep it to registering
+  the wait.
+
+`ApiCallExecutor` and `LlmExecutor` bind their templates through the shared `TemplateEngine`, so
+`{{ context.Field }}` resolves against the message the node received. `ApiCallExecutor` enforces the
+egress allow-list, attaches an `Idempotency-Key`, and surfaces a non-success status as a typed
+`ApiCallFailureException` rather than a generic HTTP error.
+
+### Custom executors
+
+Derive from `HostExecutor<TIn, TOut>` and implement `ExecuteCoreAsync`. `HandleAsync` is sealed
+because gate evaluation and the middleware pipeline live there and must not be overridden away.
+
+```csharp
+public sealed class GreetingExecutor(string id) : HostExecutor<GreetingContext, GreetingResult>(id)
+{
     protected override ValueTask<GreetingResult> ExecuteCoreAsync(
         GreetingContext input,
         IWorkflowContext context,
@@ -297,11 +400,260 @@ public sealed class GreetingExecutor : HostExecutor<GreetingContext, GreetingRes
 }
 ```
 
-The output type must be a reference type because a gated executor returns `null` while it parks the workflow.
+`TOut` is constrained to a reference type because the pause path returns `null` and the engine only
+auto-sends non-null handler results — that is exactly what lets a gated or waiting executor park
+without emitting a bogus message downstream.
 
-### Raw framework nodes
+Inside an executor, `Runtime` carries the per-instance context: `Runtime.InstanceId`,
+`Runtime.TenantId`, `Runtime.Attempt`, `Runtime.CurrentSuperstep`, and the nullable hooks
+`Runtime.Audit`, `Runtime.Notify` and `Runtime.Services`. Override `Metadata` to describe the node
+for the graph endpoint.
 
-`WorkflowBuildContext.RawNode(...)` is an escape hatch for raw framework executor bindings and agent bindings. Raw nodes participate in the graph but do not receive host executor middleware and cannot be approval-gated. Use `Node(...)` with a `HostExecutor<TIn, TOut>` when middleware or approvals are required.
+### Edges
+
+Edges come from the Agent Framework's `WorkflowBuilder`. The constructor takes the start node, and
+`WithOutputFrom` names the node whose result becomes the workflow's result.
+
+```csharp
+Workflow workflow = new WorkflowBuilder(validate)
+    .AddEdge(validate, enrich)                      // sequential
+    .AddEdge<Order>(enrich, escalate,               // conditional: only when the predicate holds
+        condition: order => order is { Amount: > 10_000m })
+    .AddEdge<Order>(enrich, settle,
+        condition: order => order is { Amount: <= 10_000m })
+    .AddFanOutEdge(settle, [notifyOps, notifyCustomer])          // both targets
+    .AddFanInBarrierEdge([notifyOps, notifyCustomer], complete)  // waits for every source
+    .WithOutputFrom(complete)
+    .WithName(Name)
+    .Build();
+```
+
+| Method | Behaviour |
+| --- | --- |
+| `AddEdge(source, target)` | Unconditional |
+| `AddEdge<T>(source, target, condition)` | Traversed only when the predicate holds for the message |
+| `AddEdge(source, target, label, idempotent)` | Labelled for the graph view; `idempotent` permits re-adding the same edge |
+| `AddFanOutEdge(source, targets)` | Sends to every target |
+| `AddFanOutEdge<T>(source, targets, targetSelector)` | Sends to the subset the selector picks by index |
+| `AddFanInBarrierEdge(sources, target)` | Target runs once every source has delivered |
+| `WithOutputFrom(executor, …)` | Binds the workflow result; accepts several nodes |
+| `Build(validateOrphans: true)` | Throws on a node no edge reaches — a typo, not a design |
+
+Two conditional edges out of one node is how a branch is expressed; there is no separate switch
+construct. Make the predicates exhaustive, or a message matching neither simply stops there and the
+run completes with no output.
+
+`FanInExecutor<TItem, TOut>` is the natural target of `AddFanInBarrierEdge`, since the barrier
+delivers a list.
+
+### Approval gates on a node
+
+A node attached with no gate block runs autonomously. Pass one to require a human decision:
+
+```csharp
+ExecutorBinding settle = context.Node(new Settle("settle"), gate => gate
+    .Mode(ExecutionMode.RequireApproval)
+    .When<Order>(order => order.Amount > 25_000m)   // Conditional mode
+    .Reason("RegulatedSettlement")
+    .AssignTo("group:finance", "user:cfo")
+    .RequireApprovers(2)
+    .ExpiresAfter(TimeSpan.FromHours(8))
+    .OnExpiry(ExpiryAction.Escalate, "group:exec")
+    .AllowModification()
+    .RequireSegregationOfDuties()
+    .Locked());                                     // tenants may tighten, never weaken
+```
+
+Every gated node is reconfigurable per tenant at run time unless the author calls `.Locked()`. See
+[Human approval gates](#human-approval-gates) for the decision flow and
+[Tenant executor configuration](#tenant-executor-configuration) for precedence.
+
+### Events on a node
+
+Publishing and waiting are ordinary nodes; notifying is a call inside one. Resolve the broker and
+subscription store from `context.Services`:
+
+```csharp
+var broker = context.Services!.GetRequiredService<IEventBroker>();
+var subscriptions = context.Services!.GetRequiredService<IEventSubscriptionStore>();
+
+ExecutorBinding publish = context.Node(new PublishEventExecutor<OrderPlaced>(
+    "publish-order-placed", broker, topic: "orders.placed", correlationKey: o => o.OrderId));
+
+ExecutorBinding wait = context.Node(new WaitForEventExecutor<Order, PaymentSettled>(
+    "await-settlement", subscriptions, "payment.settled",
+    correlationKey: o => o.OrderId, timeout: TimeSpan.FromDays(3)));
+```
+
+See [Events](#events-history-and-sse) and
+[Event broker](#event-broker-and-event-driven-workflows).
+
+### Failure classification
+
+`Classify` decides what a thrown exception means for the instance.
+
+| Disposition | Effect |
+| --- | --- |
+| `Retry` | Backoff and try again, until `MaxAttempts` or `MaxLifetimeHours` |
+| `DeadStop` | Terminal. Retrying cannot help, so do not burn attempts discovering that |
+| `Escalate` | Terminal, and flagged for operator attention |
+
+`WorkflowFailure` carries `ExecutorId`, `Exception`, `AttemptCount`, `Superstep` and the executor's
+`Metadata`, so a classifier can decide differently per node without inspecting message text.
+
+The default classifier already handles the common cases — rate limits, overload and 5xx retry;
+validation, structured-output and 4xx dead-stop — so a definition overrides it only where its own
+domain disagrees, and delegates the rest:
+
+```csharp
+public FailureDisposition Classify(WorkflowFailure failure) => failure.Exception switch
+{
+    InsufficientFundsException  => FailureDisposition.DeadStop,   // retrying cannot help
+    ReconciliationBreakException => FailureDisposition.Escalate,  // a human must look
+    _ => DefaultFailureClassifier.Instance.Classify(failure)
+};
+```
+
+Framework exceptions a classifier can match on: `WorkflowDeadStopException`,
+`ApprovalRejectedException`, `WorkflowValidationException`, `StructuredOutputException`,
+`ApiCallFailureException` (carries `StatusCode`, body excerpt and `Retry-After`),
+`LlmRateLimitException`, `LlmOverloadedException`.
+
+Throwing `WorkflowDeadStopException` from inside an executor is the direct way to say "this run is
+over" without routing it through the classifier.
+
+See [Retries and failure classification](#retries-and-failure-classification).
+
+### Engine context inside an executor
+
+`ExecuteCoreAsync` receives the Agent Framework's `IWorkflowContext`, which is separate from
+`Runtime`: `Runtime` is what the host adds, `IWorkflowContext` is what the engine offers.
+
+| Member | Purpose |
+| --- | --- |
+| `QueueStateUpdateAsync(key, value)` | Writes state that survives into the next checkpoint |
+| `ReadStateAsync<T>(key)` / `ReadOrInitStateAsync<T>` | Reads it back after a resume |
+| `RequestHaltAsync()` | Parks the run — the mechanism behind gates and event waits |
+| `YieldOutputAsync(output)` | Emits a workflow output without being the terminal node |
+| `SendMessageAsync(message, targetId)` | Sends to a specific node, bypassing edge routing |
+| `AddEventAsync(workflowEvent)` | Raises an engine event, ordered with executor events |
+
+Use `QueueStateUpdateAsync` rather than executor fields for anything that must survive a restart: an
+executor instance is rebuilt on resume, and a field is gone with it.
+
+### Middleware
+
+Two seams, both registered at composition rather than declared by a workflow. Lower `Order` runs
+earlier in the outer pipeline.
+
+```csharp
+public sealed class TimingMiddleware : IExecutorMiddleware
+{
+    public int Order => 10;
+
+    // Narrow the scope; the default applies it to every node.
+    public bool AppliesTo(ExecutorDescriptor descriptor) => descriptor.ExecutorId != "noisy";
+
+    public async ValueTask InvokeAsync(
+        ExecutorInvocationContext context, ExecutorDelegate next, CancellationToken ct)
+    {
+        long start = Stopwatch.GetTimestamp();
+        await next(context, ct);
+        // context.Output, context.Exception and context.Succeeded are all readable here.
+        Record(context.Descriptor.ExecutorId, Stopwatch.GetElapsedTime(start), context.Succeeded);
+    }
+}
+```
+
+`IWorkflowMiddleware` wraps a whole run and sees `WorkflowInvocationContext` instead.
+`ExecutorInvocationContext.Exception` is settable, so middleware can observe, replace or swallow a
+failure as the pipeline unwinds — which is how retry-shaping and drift detection work without the
+workflow knowing.
+
+Built-in middleware comes from `AddBuiltInMiddleware()`: OpenTelemetry spans for runs and executors,
+request/response logging, and LLM drift. See
+[Registering workflows and middleware](#registering-workflows-and-middleware).
+
+### A definition using all of it
+
+```csharp
+public sealed class OrderWorkflow
+    : IWorkflowDefinition<OrderContext, OrderResult>,
+      IAuditedWorkflowDefinition,
+      IEventTriggeredWorkflow,
+      INotifyingWorkflow
+{
+    public string Name => "order";
+    public string Version => "1.2.0";
+
+    // Started by a domain message as well as by POST /workflows/order/instances.
+    public IReadOnlyList<EventTrigger> Triggers =>
+        [new EventTrigger { TopicFilter = "orders.placed" }];
+
+    // Quiet by default; the interesting node stays loud. Streaming stays on.
+    public NotificationPolicy Notifications { get; } = new()
+    {
+        Level = NotificationLevel.Lifecycle,
+        ByNode = new Dictionary<string, NotificationLevel>(StringComparer.Ordinal)
+        {
+            ["settle"] = NotificationLevel.Standard
+        },
+        Emits = ["order.repriced"]
+    };
+
+    public AuditRecordDefinition AuditRecord { get; } = new(
+        "order", "One order, as processed.",
+        [
+            new AuditSectionDefinition("submission", "What was submitted.", Multiple: false),
+            new AuditSectionDefinition("step", "One processing step."),
+            new AuditSectionDefinition("outcome", "How the run settled.", Multiple: false)
+        ]);
+
+    public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken ct)
+    {
+        var subscriptions = context.Services!.GetRequiredService<IEventSubscriptionStore>();
+
+        ExecutorBinding validate = context.Node(new Validate("validate"));
+
+        ExecutorBinding settle = context.Node(new Settle("settle"), gate => gate
+            .When<OrderContext>(order => order.Amount > 25_000m)
+            .Reason("AmountAboveThreshold")
+            .AssignTo("group:finance")
+            .RequireApprovers(2)
+            .Locked());
+
+        ExecutorBinding awaitPayment = context.Node(
+            new WaitForEventExecutor<OrderContext, PaymentSettled>(
+                "await-settlement", subscriptions, "payment.settled",
+                correlationKey: o => o.OrderId, timeout: TimeSpan.FromDays(3)));
+
+        ExecutorBinding complete = context.Node(new Complete("complete"));
+
+        return new ValueTask<Workflow>(new WorkflowBuilder(validate)
+            .AddEdge(validate, settle)
+            .AddEdge(settle, awaitPayment)
+            .AddEdge(awaitPayment, complete)
+            .WithOutputFrom(complete)
+            .WithName(Name)
+            .Build());
+    }
+
+    public FailureDisposition Classify(WorkflowFailure failure)
+        => DefaultFailureClassifier.Instance.Classify(failure);
+}
+```
+
+### Versioning rules that bite
+
+- **Executor ids are the key for tenant gate policies**, and policies are stored per workflow
+  *version*. A tenant's configuration does not carry forward to a new version, so a version bump
+  starts from the author's declared gates again.
+- **An in-flight instance keeps the version it started on.** The registry resolves by the instance's
+  recorded version, so redeploying a new version never changes the shape of a run already underway.
+- **`POST /instances/{id}/rerun` in restart mode creates the new instance at the *current* version**,
+  which is the one case where a rerun can behave differently from the original.
+- Two definitions registered with the same name and version fail startup rather than one silently
+  winning.
 
 ## Workflow audit records
 
@@ -450,7 +802,7 @@ builder.Services
     .AddWorkflow(new GreetingWorkflow());
 ```
 
-`AddAbacus(...)` registers the workflow host, built-in middleware, background services, control-plane UI, and the default in-memory stores. Set `Abacus:SqlServer:ConnectionString` to replace the in-memory stores with EF Core SQL Server implementations, and set `Abacus:Redis:ConnectionString` to enable Redis Streams and cross-replica control messages.
+`AddAbacus(...)` registers the workflow host, built-in middleware, background services, control-plane UI, and the default in-memory stores. Set `Abacus:SqlServer:ConnectionString` to replace the in-memory stores with EF Core SQL Server implementations, and set `Abacus:Redis:ConnectionString` to enable Redis Streams, cross-replica control messages, and the cross-service event broker.
 
 ### Middleware ordering
 
@@ -669,7 +1021,15 @@ Configuration writes are recorded in the audit store as `gate.policy.set` and `g
 
 ## Events, history, and SSE
 
-Every instance event has a monotonically increasing per-instance `Sequence`. The same sequence is used as the SSE event ID, which lets clients reconnect with `Last-Event-ID` and request replay from the same cursor.
+The system carries two kinds of events that share a word and almost nothing else.
+
+A **notification** describes what a run is doing. It is keyed by instance, ordered by a gapless sequence, and delivered to whoever happens to be watching. It never affects execution — lose one and a dashboard is briefly out of date. That is this section.
+
+A **domain event** describes what happened in the business. It is keyed by topic, routed to whoever declared interest, and it *causes* execution — lose one and work that should have happened never does. That is [Event broker and event-driven workflows](#event-broker-and-event-driven-workflows).
+
+The asymmetry in cost is why the two are built differently: notifications are best-effort fan-out over a durable log, while broker delivery is a durable state transition. A domain event may cause a notification; a notification may never cause work.
+
+Every durable instance event has a monotonically increasing per-instance `Sequence`. The same sequence is used as the SSE event ID, which lets clients reconnect with `Last-Event-ID` and request replay from the same cursor.
 
 Important event types include:
 
@@ -682,6 +1042,10 @@ Important event types include:
 - `approval.decided`
 - `approval.expired`
 - `request.pending`
+- `llm.completed`
+- `llm.delta` (transient — see below)
+- `custom.<name>` (workflow-defined — see below)
+- `event.triggered`, `event.delivered`, `event.wait_expired`
 - `workflow.output`
 - `workflow.terminated`
 - `instance.cancelled`
@@ -691,6 +1055,213 @@ Important event types include:
 - `heartbeat`
 
 Use event history for polling, audit views, and recovery. Use SSE for live progress. Approval events use the same event stream as workflow progress; consumers do not need a separate subscription to observe a gate trip.
+
+### Emitting your own notifications
+
+A node reports something the framework cannot describe on its behalf through `Runtime.Notify`, which is nullable in the same way `Runtime.Audit` is — an executor exercised outside a host gets null and costs nothing:
+
+```csharp
+if (Runtime.Notify is { } notify)
+{
+    await notify.NotifyAsync("documents.scanned", new { count = 3 }, cancellationToken);
+}
+// → event: custom.documents.scanned
+```
+
+The `custom.` prefix is applied by the runtime and cannot be opted out of, so a workflow can never shadow a framework event however it names its own, and a consumer can filter the whole class on the prefix without knowing any workflow's vocabulary. A name that is empty, contains whitespace, or has an empty segment throws at the call site — a malformed event type is indistinguishable from an event that was never sent.
+
+Payloads pass through the same redaction as every other event.
+
+### Controlling what a run emits
+
+A workflow that emits `executor.invoked` and `executor.completed` for every node of a wide fan-out can be the dominant write volume in a deployment. A definition states its own policy by implementing `INotifyingWorkflow`; one that says nothing keeps today's behaviour and pays nothing for the feature.
+
+```csharp
+public sealed class BulkWorkflow : IWorkflowDefinition<Ctx, Result>, INotifyingWorkflow
+{
+    public NotificationPolicy Notifications { get; } = new()
+    {
+        Level = NotificationLevel.Lifecycle,        // supersteps, but no per-node chatter
+        ByNode = new Dictionary<string, NotificationLevel>(StringComparer.Ordinal)
+        {
+            ["reconcile"] = NotificationLevel.Standard   // except this one, which stays loud
+        },
+        Emits = ["documents.scanned"]               // advertised by the catalog API
+    };
+}
+```
+
+| Level | Emits |
+| --- | --- |
+| `Minimal` | Start, output and terminal only |
+| `Lifecycle` | Adds superstep boundaries |
+| `Standard` | Adds `executor.*`, `llm.*` and `custom.*`. The default |
+
+`ByNode` works in both directions: it can quiet one node in a `Standard` workflow or keep one node loud in a `Minimal` one.
+
+### Turning SSE off for a workflow
+
+`Level` controls *what* is emitted. `StreamEvents` controls whether it is also streamed live.
+
+**The event log is not optional.** Every event a workflow emits is written to the durable log, and no
+setting turns that off. The only delivery choice a workflow has is whether those same events are
+*also* pushed to SSE subscribers as they happen:
+
+```csharp
+public NotificationPolicy Notifications { get; } = new()
+{
+    StreamEvents = false   // still logged in full; simply not streamed
+};
+```
+
+| `StreamEvents` | Durable log | Live SSE |
+| --- | --- | --- |
+| `true` *(default)* | Always | Yes |
+| `false` | Always | No |
+
+Turning it off suits a run nobody watches as it happens — a nightly batch, or work whose events are
+read afterwards for reconciliation. Observability is not reduced, only its timeliness: events are
+still sequenced, still redacted, still carry the workflow name, and are read in full at
+`GET /v2/workflows/{name}/instances/{id}/events`.
+
+Two consequences worth knowing:
+
+- **The SSE endpoint refuses.** `GET /instances/{id}/events` returns `409` with a problem detail
+  pointing at the v2 route, rather than holding a stream open that will never produce anything. An
+  empty stream is indistinguishable from a stalled run, and a client waiting on one has no way to
+  tell.
+- **Streamed tokens disappear entirely.** `llm.delta` is the one kind of event with no durable record
+  by design — a rendered token has no replay value — so with streaming off it has nowhere left to go.
+  That is the correct reading, a workflow that has opted out of streaming has opted out of streamed
+  tokens too, but it does make `StreamDeltas = true` alongside `StreamEvents = false` a combination
+  that produces no deltas anywhere.
+
+`EventDeliveryMode` appears on `EventEnvelope` as the runtime's own record of where a given event
+went. It is not a menu a workflow picks from — a workflow sets `StreamEvents`, and the runtime
+derives the rest.
+
+Two rules keep the policy safe. **Terminal events are never suppressible** — a subscriber's stream closes on `workflow.terminated`, and `approval.*`, `instance.*` and `event.*` are control-plane and broker facts rather than run chatter. And **filtering happens before the sequence number is taken**: a suppressed event that had consumed one would leave a hole in the gapless sequence, and `Last-Event-ID` catch-up would wait forever for an event that is never coming.
+
+Declared `Emits` names are validated at startup and surfaced on `GET /workflows/{name}`, so a consumer discovers the vocabulary rather than reverse-engineering it.
+
+### Transient events
+
+`llm.delta` is fanned out to live subscribers and **never appended to the durable store**. A token already rendered has no replay value, and the complete text is in the executor's output either way.
+
+A transient event takes no sequence number and is written to SSE without an `id:` field. That keeps the durable sequence gapless, and it leaves a reconnecting client's `Last-Event-ID` pinned to the last durable event — so a reconnect delivers the stored history plus whatever is streaming now, and never waits for a chunk that no longer exists. A token stream is not resumable, and the transport says so.
+
+Streaming is opt-in per node via `LlmOptions.StreamDeltas`, which defaults to `false`.
+
+### LLM telemetry
+
+An `LlmExecutor` emits one `llm.completed` per invocation — a model call is one fact, not a stream of them:
+
+```
+event: llm.completed
+data: {"executorId":"classify","model":"claude-sonnet-5","promptVersion":"v3",
+       "inputTokens":1840,"outputTokens":212,"costUsd":0.0084,
+       "elapsedMs":1240,"finishReason":"Stop","attempt":1,"streamed":false}
+```
+
+Turn it off for a node with `LlmOptions.EmitCompletion = false`. The prompt and the response text are deliberately absent: they already travel the executor's input/output path where redaction applies, and repeating them here would put model output on a stream a UI reads.
+
+The same numbers go to `ILogStore` as a per-instance usage entry and to OpenTelemetry as metrics, where `LlmDriftMiddleware` compares them against a rolling baseline. Cost is one of the drift signals, and it catches what token counts alone miss — a provider routing to a pricier model, or a prompt that has quietly grown.
+
+Cost needs a price table (see [Configuration](#configuration)). An unpriced model reports `null`, never zero, and unpriced samples are excluded from the cost baseline rather than counted: a zero would average in as a real observation and make a genuine rise afterwards look smaller than it is.
+
+## Event broker and event-driven workflows
+
+The broker is the other channel: a workflow publishes a message to a topic, and another workflow either **starts** because of it or **wakes up** because of it. The publisher does not know who is listening, and the listener does not know who published.
+
+**Delivery is a durable state transition, not a message.** A trigger match creates an instance row; a wait match writes the payload to a subscription row and marks the instance `Dispatchable`, which the ordinary dispatcher then claims exactly as it claims work released by an approval. Nothing is held in memory waiting to be acted on, so an event-driven pipeline survives a restart. The transport only makes that transition fast; it is never what makes it happen.
+
+### Publishing
+
+```csharp
+ExecutorBinding publish = context.Node(new PublishEventExecutor<OrderPlaced>(
+    "publish-order-placed",
+    context.Services!.GetRequiredService<IEventBroker>(),
+    topic: "orders.placed",
+    correlationKey: o => o.OrderId));
+```
+
+The node passes its input through unchanged, so it drops into an existing edge without rewiring the graph around it. Messages carry the publishing instance's tenant and id for provenance.
+
+### Subscribing
+
+A workflow subscribes in one of two ways.
+
+**Trigger** — a matching message starts a new instance, with the payload as its context:
+
+```csharp
+public sealed class ShipOrderWorkflow : IWorkflowDefinition<OrderPlaced, ShipmentResult>, IEventTriggeredWorkflow
+{
+    public IReadOnlyList<EventTrigger> Triggers =>
+        [new EventTrigger { TopicFilter = "orders.placed" }];
+}
+```
+
+**Wait** — the instance parks mid-run until a matching message arrives, then resumes with the payload:
+
+```csharp
+ExecutorBinding wait = context.Node(new WaitForEventExecutor<PaymentContext, PaymentSettled>(
+    "await-settlement",
+    context.Services!.GetRequiredService<IEventSubscriptionStore>(),
+    topicFilter: "payment.settled",
+    correlationKey: c => c.OrderId,
+    timeout: TimeSpan.FromDays(3),
+    onExpiry: WaitExpiryAction.DeadStop));
+```
+
+A wait costs nothing while it waits. The executor registers a durable subscription and halts, and the instance checkpoints and releases its lease — the same park mechanism an approval gate uses. A workflow can wait days on a settlement without holding an execution slot.
+
+### Topics
+
+Topics are dot-delimited. Subscriber filters may use `*` for exactly one segment and `#` for the trailing remainder; published topics may not use either.
+
+| Filter | Matches | Does not match |
+| --- | --- | --- |
+| `orders.placed` | `orders.placed` | `orders.shipped` |
+| `orders.*` | `orders.placed` | `orders`, `orders.eu.placed` |
+| `orders.#` | `orders`, `orders.eu.west.placed` | `payments.placed` |
+
+Wildcards must be whole segments — `order*` is rejected rather than quietly treated as a literal, because a filter that matches nothing looks identical to an upstream that published nothing. Matching is ordinal and case-sensitive.
+
+### Local by default, global by declaration
+
+Scope travels on the message, not on the call site and not on whichever transport happens to be registered.
+
+| Scope | Reach |
+| --- | --- |
+| `Local` *(default)* | Stays inside the publishing service; a private implementation detail of it |
+| `Distributed` | Crosses the service boundary, for pub/sub between separately deployed services |
+
+The same publishing code is therefore correct in a single service and in a fleet, and registering a distributed transport widens what a publisher *may* do without changing what any existing publisher does.
+
+| Transport | Reach | Competing consumers | Replay | Dead letter |
+| --- | --- | --- | --- | --- |
+| `InProcessEventBroker` *(default)* | This service | Yes | No | No |
+| `RedisEventBroker` *(`AddRedisEventBroker`)* | Every service | Yes | Yes | Yes |
+| `RabbitMqEventBroker` *(`AddRabbitMqEventBroker`)* | Every service | Yes | No | Yes |
+
+Each distributed broker is the in-process broker *plus a wire*, not a second implementation. Local messages never leave the process. Distributed ones go onto the transport and come back to every service through its own consumer, including the publisher's own — publishing does not also deliver locally, because that would deliver twice. Consumer groups carry the distinction between routing work and observing it: a named `ConsumerGroup` means exactly one member of the fleet handles each message, an unnamed one gets a private group and sees its own copy.
+
+The two differ in where filtering happens and in what they can honestly claim:
+
+- **Redis** publishes to one stream and filters client-side, so a subscriber is woken for traffic it then discards. It can replay, because a stream retains.
+- **RabbitMQ** publishes to a topic exchange and filters server-side by routing key, so a subscriber is only woken for what it asked for. It cannot replay — a queue holds what arrives after it is bound — and `SupportsReplay` says so rather than quietly behaving as `Now`. Dead-lettering is native.
+
+The topic vocabularies happen to agree: AMQP's `*` is one word and `#` is the remainder, which is exactly what `TopicPattern` means, so filters pass through unchanged.
+
+Register one or the other, not both — the second registration replaces the first.
+
+Publishing `Distributed` against an in-process broker fails invisibly — the message still reaches every local subscriber and simply never leaves the host. So a broker publishes a `BrokerCapabilities` record and an impossible combination is rejected at composition time: a mismatched executor throws in its constructor, and `POST /events` returns `400` rather than `202`.
+
+### Operating it
+
+Broker activity is reported onto the instance's own event stream as `event.triggered`, `event.delivered` and `event.wait_expired`, so an operator watching a run sees the domain activity that moved it inline with everything else. The instance detail page shows a **Waiting on** panel naming the topic, the blocked node, the correlation key and the expiry — `AwaitingInput` with no stated cause is the worst version of this feature.
+
+`GET /subscriptions` lists what is listening and what is waiting.
 
 ## HTTP API
 
@@ -752,7 +1323,37 @@ Unknown workflow, version, or executor returns `404`. A raw node or an unsupport
 | `GET` | `/instances/{id}/checkpoints` | Inspect checkpoint metadata |
 | `GET` | `/instances/{id}/events/history` | Read persisted event history |
 | `GET` | `/instances/{id}/events` | Subscribe to live SSE events |
+| `GET` | `/v2/workflows/{name}/instances/{id}/events` | The event log, scoped and attributed by workflow |
 | `GET` | `/workflows/{name}/instances/{id}/state` | Lifecycle status plus the workflow's own audit record |
+
+`/v2/workflows/{name}/instances/{id}/events` is the read path for a workflow configured
+[log-only](#turning-sse-off-for-a-workflow), and equally valid for a streaming one — the same rows
+either way. Like the instance-state route it is scoped by workflow name, so a caller states which
+workflow they believe they are reading and a mismatch returns `404` rather than being silently
+accepted. `from`, `to`, `limit` and `types` all apply.
+
+The response carries the instance and workflow context once, and each row repeats `instanceId` and
+`workflowName` so events collected across several instances keep their attribution:
+
+```json
+{
+  "instanceId": "01J...", "workflowName": "nightly-reconcile",
+  "workflowVersion": "1.0.0", "tenantId": "acme",
+  "total": 12, "nextCursor": null,
+  "items": [
+    { "instanceId": "01J...", "workflowName": "nightly-reconcile", "sequence": 7,
+      "eventType": "custom.batch.processed", "executorId": "reconcile", "superstep": 2,
+      "payloadJson": { "rows": 500 }, "occurredAt": "2026-08-17T09:00:00Z" }
+  ]
+}
+```
+
+Payloads are re-emitted as JSON values rather than escaped strings, so a caller reads them directly
+instead of parsing twice.
+
+`GET /instances/{id}/events` returns `409` for a log-only workflow, with a problem detail pointing at
+the v2 route. Holding a stream open that will never produce anything is worse than refusing: a client
+cannot tell it apart from a stalled run.
 
 `/workflows/{name}/instances/{id}/state` is the one instance route scoped by workflow name, because
 what it returns is shaped by that workflow's declaration. A mismatched name is a wrong URL rather
@@ -808,6 +1409,23 @@ Control operations are instance-state dependent. The API returns conflict respon
 | `GET` | `/approvals/{approvalId}` | Retrieve one approval |
 | `GET` | `/instances/{id}/approvals` | List approvals for an instance |
 | `POST` | `/approvals/{approvalId}/decision` | Submit an approval decision |
+
+### Domain events
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/events` | Publish a domain message to a topic |
+| `GET` | `/subscriptions` | List triggers and waits |
+
+`POST /events` takes `{ "topic", "payload", "correlationKey", "scope" }`. `scope` defaults to `Local`; `Distributed` is refused with `400` when no distributed broker is registered, because accepting it would mean the other service silently never hears about it. An `Idempotency-Key` header becomes the message id, so a retried publish is the same message rather than a second one.
+
+```bash
+curl -X POST http://localhost:5000/events \
+  -H 'Content-Type: application/json' -H 'X-Tenant-Id: acme' \
+  -d '{"topic":"payment.settled","payload":{"orderId":"ORD-1","amount":250.50},"correlationKey":"ORD-1"}'
+```
+
+`GET /subscriptions` filters on `instanceId`, `topic`, `kind` (`Trigger` or `Wait`), `pendingOnly` and `limit`. Delivered payloads are deliberately absent from the response: they are domain data already redacted on the way to the event stream, and repeating them here would undo that.
 
 ## Configuration
 
@@ -889,10 +1507,28 @@ select the concrete infrastructure it substitutes for the in-memory defaults:
   "Abacus": {
     "AuditRecords": { "ConnectionString": "Data Source=./data/abacus-audit.db" },
     "SqlServer": { "ConnectionString": "", "EnsureDatabaseCreated": false },
-    "Redis": { "ConnectionString": "", "MaxStreamLength": 10000 }
+    "Redis": { "ConnectionString": "", "MaxStreamLength": 10000, "MaxBrokerStreamLength": 100000 },
+    "RabbitMq": { "ConnectionString": "" },
+    "Llm": {
+      "Pricing": {
+        "claude-sonnet-5": { "InputPerMillion": 3.00, "OutputPerMillion": 15.00 }
+      }
+    }
   }
 }
 ```
+
+`Abacus:Redis:MaxBrokerStreamLength` is larger than `MaxStreamLength` because one broker stream
+carries every topic for the whole deployment, while the event streams are per instance.
+
+`Abacus:RabbitMq:ConnectionString` is an AMQP URI. Setting it selects RabbitMQ as the event broker in
+place of Redis Streams; the Redis event bus, which is a separate concern, is unaffected. Setting both
+Redis and RabbitMQ therefore gives you Redis for SSE fan-out and RabbitMQ for domain messages, which
+is a legitimate deployment rather than a misconfiguration.
+
+`Abacus:Llm:Pricing` is what turns token counts into cost on `llm.completed` and into a drift signal.
+A model with no entry reports `null` rather than zero — "we do not know" and "it was free" are
+different facts, and conflating them would drag the cost baseline down and mask a later rise.
 
 `Abacus:AuditRecords:ConnectionString` backs the generic audit-record store with SQLite and defaults
 to `Data Source=./data/abacus-audit.db`; the directory is created at startup and the migrations are
@@ -1067,7 +1703,18 @@ The solution includes several test layers:
 | Unit tests | Contracts, policies, runner behavior, middleware, executors, stores, audit recorder, and control logic |
 | Integration tests | Real ASP.NET Core host, HTTP routes, event streams, approvals, instance controls, the instance state route, and the example workflow end to end |
 | Chaos tests | Failure and lifecycle scenarios |
+| Broker tests | The distributed brokers against real Redis and RabbitMQ, via Testcontainers |
 | Load tests | Throughput-oriented test project |
+
+Every suite except the broker tests runs with no external dependency, which is what keeps a clone
+testable on a fresh machine. `Abacus.Run.BrokerTests` is the deliberate exception: a transport claim
+that has never touched the wire is not a verified claim, and no in-memory double can tell you whether
+a Redis consumer group or an AMQP topic exchange behaves the way the abstraction says it does.
+
+Testcontainers starts and disposes the containers itself, so there is nothing to run beforehand. When
+no container runtime is present the tests report as **skipped** rather than failed — a machine or CI
+leg without Docker still gets a green suite instead of a red one it cannot fix. Watch for that in the
+output: a run reporting skips has verified nothing about the transports.
 
 Common commands:
 
@@ -1080,6 +1727,9 @@ dotnet test --configuration Release --no-build --collect:"XPlat Code Coverage"
 
 # One project
 dotnet test tests/Abacus.Run.UnitTests/Abacus.Run.UnitTests.csproj
+
+# The distributed brokers against real Redis and RabbitMQ (needs Docker)
+dotnet test tests/Abacus.Run.BrokerTests/Abacus.Run.BrokerTests.csproj
 
 # One test by name
 dotnet test tests/Abacus.Run.UnitTests/Abacus.Run.UnitTests.csproj \
@@ -1132,6 +1782,24 @@ Provide an `IGatePolicyStore` implementation when approval requirements depend o
 ### Custom event sinks and buses
 
 The runner publishes through `IEventSink`. A sink may persist the event, relay it to an event bus, or do both. Preserve the per-instance sequence when forwarding to SSE or external consumers.
+
+An envelope marked `Transient` must be relayed but **not** persisted, and carries no sequence number. A sink that stores it anyway reintroduces the write amplification transience exists to avoid; one that assigns it a sequence puts a hole in the durable sequence and breaks `Last-Event-ID` catch-up.
+
+### Custom event brokers
+
+Implement `IEventBroker` to carry domain messages over a transport of your choosing — Azure Service Bus, Kafka, NATS. Register it in place of the default `InProcessEventBroker`. `RedisEventBroker` and `RabbitMqEventBroker` are the two worked examples, and they differ enough to be worth reading as a pair: one filters client-side and can replay, the other filters at the exchange and cannot.
+
+Three obligations:
+
+- **Honour `DeliveryScope`.** A `Local` message must never leave the process. A broker that widens local traffic onto the wire leaks what a service declared private.
+- **Report `BrokerCapabilities` truthfully.** It is what lets composition reject an impossible subscription at startup instead of delivering locally and looking like it worked. Overstating a capability turns a startup error into a silent production gap.
+- **Distinguish consumer groups.** A named `ConsumerGroup` means exactly one member of the fleet handles each message; an unnamed one means every subscriber gets its own copy. Collapsing the two turns work routing into duplicated work, or an observer into a thief.
+
+Delivery may be at-least-once. Exactly-once resumption is the subscription store's job, not the transport's: `IEventSubscriptionStore.TryDeliverAsync` is a compare-and-set, so a redelivered message costs a lookup rather than resuming an instance twice.
+
+### Custom subscription storage
+
+Implement `IEventSubscriptionStore` so triggers and waits outlive the process. `TryDeliverAsync` must be a conditional update — a relational implementation writes `UPDATE ... WHERE DeliveredMessageId IS NULL` and reports whether it won. `ClaimExpiredAsync` must mark what it returns under the same lock or transaction that selected it, or two sweepers will expire the same instance twice. Reuse `SubscriptionMatch.Matches` as the final predicate after any database-side pre-filtering, so a custom store cannot disagree with the in-memory one about what a subscription means.
 
 ## Design constraints
 
@@ -1186,6 +1854,48 @@ Check that `AddBackgroundServices()` is registered and that the dispatcher is ru
 
 Inspect the approval state, decision authorization, quorum, expiry, and instance status. A successful decision wakes the instance by moving it to a claimable state; the dispatcher must be running to execute the resumed run.
 
+### A published event starts or resumes nothing
+
+Check `GET /subscriptions` first — an empty result means nothing was ever listening, which is a different problem from a delivery failure.
+
+The usual cause is that the filter and the topic do not match: matching is ordinal and case-sensitive, `*` covers exactly one segment, and `#` only matches as the final segment. `orders.*` does not match `orders.eu.placed`. A wildcard glued to literal text (`order*`) is rejected at registration rather than treated as a prefix, so check startup logs for a rejected trigger.
+
+Tenant and correlation narrow further: a subscription that names a tenant sees only that tenant, and one that names a correlation key sees only messages carrying the identical value. A message published with no tenant does not match a subscription scoped to one.
+
+`BrokerDispatchService` counts messages that matched nothing and logs them at debug. If the count is rising, the message is arriving and the filters are wrong; if it is not, the message is not arriving.
+
+Finally, a `Distributed` message needs a distributed broker. Against the in-process default the publish is refused outright, so check for a `NotSupportedException` at the publisher or a `400` from `POST /events` rather than looking for a lost message.
+
+### An instance is stuck in `AwaitingInput`
+
+If the workflow uses `WaitForEventExecutor`, this is the normal parked state, not a fault. The instance detail page shows a **Waiting on** panel naming the topic, the blocked node and the correlation key; `GET /subscriptions?instanceId={id}&pendingOnly=true` is the same information over the API.
+
+A wait with no `timeout` waits forever by design. Set one, with `WaitExpiryAction.DeadStop` to fail the instance or `Resume` to let the workflow take its own timeout branch, and make sure `EventWaitSweeperService` is running — it comes with `AddBackgroundServices()`.
+
+### `llm.delta` events are missing from event history
+
+They are not stored, by design. Streamed tokens are stream-only: live fan-out, no sequence number, no durable row. Subscribe to `GET /instances/{id}/events` to see them; `GET /instances/{id}/events/history` will never return them.
+
+If none arrive on the live stream either, check whether the workflow sets `StreamEvents = false`. Deltas are the one kind of event with no durable record by design, so with streaming off they have nowhere left to go — intended, not a bug, but it does make `StreamDeltas = true` alongside `StreamEvents = false` a combination that produces no tokens anywhere.
+
+### The SSE endpoint returns 409
+
+The workflow sets `StreamEvents = false`, so it never streams. Its events are all still recorded — read them at `GET /v2/workflows/{name}/instances/{id}/events`, the URL the problem detail carries. This is deliberate: an empty stream held open is indistinguishable from a stalled run, so the endpoint refuses rather than misleading a client into waiting.
+
+### Can a workflow turn off event logging?
+
+No, and there is no setting that does it. `StreamEvents` switches the live stream only; every event a workflow emits is written to the durable log regardless. `NotificationLevel` can reduce *which* events are emitted at all — a `Minimal` workflow emits fewer — but whatever is emitted is always recorded.
+
+Also confirm `LlmOptions.StreamDeltas` is set on that node — it defaults to `false`, so no deltas are produced at all unless the definition asked for them.
+
+### `llm.completed` reports `costUsd: null`
+
+The model has no entry under `Abacus:Llm:Pricing`. Cost is reported as absent rather than zero on purpose, and unpriced samples are excluded from the cost drift baseline, so an unpriced period cannot make a later rise look smaller than it is. Add the model's per-million rates to start pricing it.
+
+### Expected events are missing from the stream
+
+Check whether the definition implements `INotifyingWorkflow`. A `Minimal` or `Lifecycle` level suppresses `executor.*` and `custom.*`, and `ByNode` can quiet one node while the rest of the workflow stays loud. Suppressed events consume no sequence number, so a gap in the numbering is not the symptom — the events are simply absent.
+
 ### An executor pauses for approval although the definition left it autonomous
 
 A tenant or host-wide policy is gating it. Call `GET /workflows/{name}/versions/{version}/nodes` as that tenant and read `effectiveSource`: `tenant` means the tenant configured it, `host` means a host-wide policy applies. `DELETE` the node's override to restore the declared gate. Remember the policy is version-scoped — check the version the instance actually pinned, not the latest.
@@ -1204,6 +1914,375 @@ storage problem surfaces, not the response.
 ### An outbound call is blocked
 
 Check the URL scheme, whether the target resolves to an internal address, and whether the hostname matches `WorkflowHost:Egress:AllowedHosts`. Keep `Egress:Enforce=true` unless this is a controlled local test.
+
+## Appendix: authoring variations
+
+Each recipe is a complete `BuildAsync` (or the declaration that matters), showing one shape in
+isolation. They compose — the [worked definition](#a-definition-using-all-of-it) above combines
+several.
+
+### A.1 Linear
+
+The default shape. One node after another, output from the last.
+
+```csharp
+public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken ct)
+{
+    ExecutorBinding validate = context.Node(new Validate("validate"));
+    ExecutorBinding enrich   = context.Node(new Enrich("enrich"));
+    ExecutorBinding submit   = context.Node(new Submit("submit"));
+
+    return new ValueTask<Workflow>(new WorkflowBuilder(validate)
+        .AddEdge(validate, enrich)
+        .AddEdge(enrich, submit)
+        .WithOutputFrom(submit)
+        .WithName(Name)
+        .Build());
+}
+```
+
+### A.2 Branch
+
+Two conditional edges out of one node. There is no switch construct; this is the branch.
+
+```csharp
+ExecutorBinding triage = context.Node(new Triage("triage"));
+ExecutorBinding fast   = context.Node(new FastPath("fast-path"));
+ExecutorBinding manual = context.Node(new ManualPath("manual-path"));
+
+return new ValueTask<Workflow>(new WorkflowBuilder(triage)
+    .AddEdge<Order>(triage, fast,   condition: o => o is { Amount: <= 10_000m })
+    .AddEdge<Order>(triage, manual, condition: o => o is { Amount: >  10_000m })
+    .WithOutputFrom(fast, manual)          // whichever branch ran supplies the result
+    .WithName(Name)
+    .Build());
+```
+
+The condition's parameter is `T?`, so a pattern (`o is { … }`) reads better than a null-forgiving
+dereference and handles the null case explicitly.
+
+Make the predicates exhaustive. A message matching neither edge stops there, and the run completes
+with no output rather than failing — which looks like success and is the hardest branch bug to spot.
+
+### A.3 Fan-out and fan-in
+
+```csharp
+ExecutorBinding split   = context.Node(new Split("split"));
+ExecutorBinding credit  = context.Node(new CheckCredit("check-credit"));
+ExecutorBinding stock   = context.Node(new CheckStock("check-stock"));
+ExecutorBinding fraud   = context.Node(new CheckFraud("check-fraud"));
+ExecutorBinding decide  = context.Node(new FanInExecutor<CheckResult, Decision>(
+    "decide", checks => new Decision(checks.All(c => c.Passed))));
+
+return new ValueTask<Workflow>(new WorkflowBuilder(split)
+    .AddFanOutEdge(split, [credit, stock, fraud])
+    .AddFanInBarrierEdge([credit, stock, fraud], decide)   // waits for all three
+    .WithOutputFrom(decide)
+    .WithName(Name)
+    .Build());
+```
+
+Selective fan-out picks targets by index instead of sending to all:
+
+```csharp
+.AddFanOutEdge<Order>(split, [credit, stock, fraud],
+    targetSelector: (order, count) => order!.SkipFraudCheck ? [0, 1] : [0, 1, 2])
+```
+
+A wide fan-out is the usual reason to set `NotificationLevel.Lifecycle` — see [A.10](#a10-quiet-a-chatty-workflow).
+
+### A.4 Approval gates
+
+Three ways to gate, from blunt to conditional:
+
+```csharp
+// Always requires a decision.
+context.Node(new Publish("publish"), gate => gate
+    .Mode(ExecutionMode.RequireApproval)
+    .AssignTo("group:ops")
+    .ExpiresAfter(TimeSpan.FromHours(4)));
+
+// Only above a threshold. `When` implies Conditional mode.
+context.Node(new Settle("settle"), gate => gate
+    .When<Order>(order => order.Amount > 25_000m)
+    .Reason("AmountAboveThreshold")
+    .RequireApprovers(2)
+    .AllowModification());
+
+// A floor a tenant may tighten but never weaken.
+context.Node(new Payout("payout"), gate => gate
+    .Mode(ExecutionMode.RequireApproval)
+    .AssignTo("group:finance")
+    .RequireSegregationOfDuties()
+    .OnExpiry(ExpiryAction.DeadStop)
+    .Locked());
+```
+
+`HumanApprovalExecutor<T>` does the same job as a node rather than as configuration, when the
+approval is part of the workflow's own logic and should be visible in the graph:
+
+```csharp
+ExecutorBinding signOff = context.Node(new HumanApprovalExecutor<Order>("sign-off"));
+```
+
+### A.5 Durable delay
+
+`DelayExecutor` checkpoints and halts rather than blocking a thread or holding a lease, so a long
+delay costs no execution capacity.
+
+```csharp
+var timers = context.Services!.GetRequiredService<ITimerService>();
+
+ExecutorBinding cooloff = context.Node(
+    new DelayExecutor("cool-off", TimeSpan.FromHours(24), timers));
+
+return new ValueTask<Workflow>(new WorkflowBuilder(submit)
+    .AddEdge(submit, cooloff)
+    .AddEdge(cooloff, settle)
+    .WithOutputFrom(settle)
+    .Build());
+```
+
+### A.6 HTTP call
+
+```csharp
+ExecutorBinding fetch = context.Node(new ApiCallExecutor("fetch-invoice",
+    new ApiCallOptions
+    {
+        Method = HttpMethod.Get,
+        UrlTemplate = "https://erp.internal/invoices/{{ context.InvoiceId }}",
+        Headers = { ["Accept"] = "application/json" },
+        TimeoutSeconds = 15,
+        SuccessCodes = [200, 204],
+        ResponseAs = typeof(InvoiceDto),
+        AllowedHosts = ["erp.internal"],
+        EnforceEgress = true,        // refuse anything not on the allow-list
+        SendIdempotencyKey = true    // safe to retry
+    },
+    () => context.Services!.GetRequiredService<IHttpClientFactory>()
+        .CreateClient(ApiCallOptions.HttpClientName)));
+```
+
+A non-success status arrives as a typed `ApiCallFailure` carrying status, body excerpt and
+`Retry-After`, so [`Classify`](#a12-custom-failure-classification) can act on it rather than parsing
+a message.
+
+### A.7 LLM node
+
+```csharp
+ExecutorBinding classify = context.Node(new LlmExecutor("classify",
+    new LlmOptions
+    {
+        Model = "claude-sonnet-5",
+        SystemPrompt = "Classify the invoice.",
+        PromptVersion = "v3",                 // tags the drift baseline
+        UserTemplate = "{{ context.DocumentText }}",
+        StructuredOutput = typeof(Classification),
+        Temperature = 0.0f,
+        MaxTokens = 2048,
+        StreamDeltas = true,                  // llm.delta frames, live only
+        EmitCompletion = true                 // one llm.completed per call (default)
+    },
+    model => context.Services!.GetRequiredService<IChatClient>(),
+    context.Services!.GetService<IModelPricing>()));   // enables costUsd and cost drift
+```
+
+Pass the pricing service or `costUsd` is `null` — absent, not zero. See
+[LLM telemetry](#llm-telemetry).
+
+### A.8 Started by an event
+
+```csharp
+public sealed class ShipOrderWorkflow
+    : IWorkflowDefinition<OrderPlaced, ShipmentResult>, IEventTriggeredWorkflow
+{
+    public string Name => "ship-order";
+    public string Version => "1.0.0";
+
+    public IReadOnlyList<EventTrigger> Triggers =>
+    [
+        new EventTrigger { TopicFilter = "orders.placed" },
+        new EventTrigger
+        {
+            TopicFilter = "orders.*.expedited",
+            ContextSelector = m => m.PayloadJson      // remap if the payload is not the context
+        }
+    ];
+
+    // BuildAsync as usual; the message payload arrives as the context.
+}
+```
+
+The message payload becomes the instance context, and its correlation key becomes the instance's
+correlation id. Redelivery is absorbed by the launcher's idempotency key, so a message cannot start
+the same workflow twice.
+
+### A.9 Publish and wait
+
+A two-workflow pipeline. The first publishes; the second parks until the reply arrives.
+
+```csharp
+// Producer — publishing is a side effect on the way past, so the node drops into an existing edge.
+var broker = context.Services!.GetRequiredService<IEventBroker>();
+
+ExecutorBinding publish = context.Node(new PublishEventExecutor<OrderPlaced>(
+    "publish-order-placed", broker,
+    topic: "orders.placed",
+    correlationKey: o => o.OrderId));
+
+// Consumer — parks, releases its lease, and resumes with the payload.
+var subscriptions = context.Services!.GetRequiredService<IEventSubscriptionStore>();
+
+ExecutorBinding awaitPayment = context.Node(
+    new WaitForEventExecutor<OrderContext, PaymentSettled>(
+        "await-settlement", subscriptions,
+        topicFilter: "payment.settled",
+        correlationKey: o => o.OrderId,
+        timeout: TimeSpan.FromDays(3),
+        onExpiry: WaitExpiryAction.DeadStop));   // or Resume, to take a timeout branch
+```
+
+Publishing across a service boundary is a scope on the message, not a different call — see
+[Local by default, global by declaration](#local-by-default-global-by-declaration).
+
+### A.10 Quiet a chatty workflow
+
+```csharp
+public NotificationPolicy Notifications { get; } = new()
+{
+    Level = NotificationLevel.Lifecycle,          // supersteps, no per-node chatter
+    ByNode = new Dictionary<string, NotificationLevel>(StringComparer.Ordinal)
+    {
+        ["reconcile"] = NotificationLevel.Standard  // except this one
+    }
+};
+```
+
+### A.11 Log without streaming
+
+```csharp
+public NotificationPolicy Notifications { get; } = new()
+{
+    StreamEvents = false        // full event log; no SSE
+};
+```
+
+The log is unconditional either way. `GET /instances/{id}/events` then returns `409` naming
+`GET /v2/workflows/{name}/instances/{id}/events`. See
+[Turning SSE off for a workflow](#turning-sse-off-for-a-workflow).
+
+### A.12 Custom notifications from a node
+
+```csharp
+public NotificationPolicy Notifications { get; } = new()
+{
+    Emits = ["documents.scanned"]     // advertised on GET /workflows/{name}
+};
+```
+
+```csharp
+protected override async ValueTask<ScanResult> ExecuteCoreAsync(
+    ScanContext input, IWorkflowContext context, CancellationToken ct)
+{
+    if (Runtime.Notify is { } notify)
+    {
+        await notify.NotifyAsync("documents.scanned", new { count = input.Documents.Count }, ct);
+    }
+    // → event: custom.documents.scanned
+}
+```
+
+### A.13 Audit record
+
+```csharp
+public AuditRecordDefinition AuditRecord { get; } = new(
+    "order", "One order, as processed.",
+    [
+        new AuditSectionDefinition("submission", "What was submitted.", Multiple: false),
+        new AuditSectionDefinition("step", "One processing step."),
+        new AuditSectionDefinition("outcome", "How the run settled.", Multiple: false)
+    ]);
+```
+
+```csharp
+if (Runtime.Audit is { } audit)
+{
+    await audit.OpenAsync(input.OrderId, attributes: null, ct);
+    await audit.RecordAsync("step", key: input.LineId, new { accepted = true }, ct);
+    await audit.CloseAsync(AuditRecordStatus.Completed, ct);
+}
+```
+
+Keying an entry means a retried executor corrects its record rather than doubling it. See
+[Workflow audit records](#workflow-audit-records).
+
+### A.14 Custom failure classification
+
+```csharp
+public FailureDisposition Classify(WorkflowFailure failure) => failure.Exception switch
+{
+    InsufficientFundsException  => FailureDisposition.DeadStop,   // retrying cannot help
+    ThirdPartyThrottleException => FailureDisposition.Retry,
+    ReconciliationBreakException => FailureDisposition.Escalate,  // terminal, flag for an operator
+    _ => DefaultFailureClassifier.Instance.Classify(failure)
+};
+```
+
+Classify per node when the same exception means different things in different places — the failure
+carries `ExecutorId` and the executor's `Metadata`:
+
+```csharp
+public FailureDisposition Classify(WorkflowFailure failure)
+    => failure is { ExecutorId: "optional-enrichment", Exception: HttpRequestException }
+        ? FailureDisposition.DeadStop        // this node is best-effort; do not burn attempts
+        : DefaultFailureClassifier.Instance.Classify(failure);
+```
+
+### A.15 Raw nodes, agents and sub-workflows
+
+Raw nodes join the graph but run outside the executor middleware pipeline and cannot be
+approval-gated — passing a gate block throws.
+
+```csharp
+// An AIAgent as a node.
+ExecutorBinding triage = context.RawNode(someAgent.BindAsExecutor("triage-agent"));
+
+// Another workflow as a node.
+Workflow enrichment = BuildEnrichmentGraph();
+ExecutorBinding enrich = context.RawNode(enrichment.BindAsExecutor("enrich"));
+
+// A bare handler, with no executor class at all.
+Func<Order, IWorkflowContext, CancellationToken, ValueTask> logHandler =
+    (order, _, _) => { Log(order); return ValueTask.CompletedTask; };
+ExecutorBinding log = context.RawNode(logHandler.BindAsExecutor<Order>("log"));
+
+ExecutorBinding record = context.Node(new Record("record"));   // gated, audited, with middleware
+
+return new ValueTask<Workflow>(new WorkflowBuilder(triage)
+    .AddEdge(triage, enrich)
+    .AddEdge(enrich, log)
+    .AddEdge(log, record)
+    .WithOutputFrom(record)
+    .Build());
+```
+
+A sub-workflow node runs the child graph inline. It is not a child *instance* — there is no separate
+instance row, lease or event stream for it, and its nodes are not separately gateable or
+configurable. Use `SubWorkflow` for composition of graph shape; use an event trigger
+([A.8](#a8-started-by-an-event)) when you want a genuinely independent run.
+
+### A.16 Registering what you built
+
+```csharp
+builder.Services
+    .AddAbacus(builder.Configuration)          // or AddWorkflowHost + AddBuiltInMiddleware + AddBackgroundServices
+    .AddWorkflow<OrderWorkflow>()              // resolved from DI
+    .AddWorkflow(new ShipOrderWorkflow())      // or supplied directly
+    .AddExecutorMiddleware<TimingMiddleware>();
+```
+
+Without `AddBackgroundServices()` instances are created and stay `Pending` — nothing executes them.
+See [Registering workflows and middleware](#registering-workflows-and-middleware).
 
 ## Related documents
 

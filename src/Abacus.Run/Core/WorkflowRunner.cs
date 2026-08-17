@@ -31,6 +31,9 @@ public sealed class WorkflowRunnerDependencies
     /// <see cref="IAuditedWorkflowDefinition"/>.
     /// </summary>
     public IAuditRecordStore? AuditRecords { get; init; }
+
+    /// <summary>Present when the host runs the event broker; used to drop waits on termination.</summary>
+    public IEventSubscriptionStore? EventSubscriptions { get; init; }
     public ILogStore? Logs { get; init; }
     public IServiceProvider? Services { get; init; }
     public WorkflowHostOptions Options { get; init; } = new();
@@ -48,6 +51,12 @@ public sealed class WorkflowRunner
     private int _currentSuperstep;
     private string? _latestCheckpointId;
     private readonly Queue<string> _hostInvocationEvents = new();
+
+    /// <summary>
+    /// Resolved once per run rather than per event, so the hot path is a dictionary lookup. Defaults
+    /// to emitting everything when the definition declares no policy.
+    /// </summary>
+    private NotificationPolicy _notifications = NotificationPolicy.Default;
 
     public WorkflowRunner(WorkflowRunnerDependencies dependencies)
         => _deps = dependencies ?? throw new ArgumentNullException(nameof(dependencies));
@@ -109,6 +118,10 @@ public sealed class WorkflowRunner
         CancellationToken cancellationToken)
     {
         var gates = new Dictionary<string, ApprovalGate>(StringComparer.Ordinal);
+
+        _notifications = descriptor.Definition is INotifyingWorkflow notifying
+            ? notifying.Notifications
+            : NotificationPolicy.Default;
 
         // A definition that declares an audit record gets a recorder bound to its declared shape;
         // one that doesn't gets null, and the hook costs it nothing.
@@ -224,6 +237,21 @@ public sealed class WorkflowRunner
                     return await ApplyFailureAsync(instance, descriptor, "workflow", error, cancellationToken)
                         .ConfigureAwait(false);
                 }
+
+                case LlmDeltaWorkflowEvent delta:
+                    await PublishTransientAsync(instance, WorkflowEventTypes.LlmDelta,
+                        new { executorId = delta.ExecutorId, delta = delta.Delta },
+                        delta.ExecutorId, cancellationToken).ConfigureAwait(false);
+                    break;
+
+                default:
+                    // The class of bug rather than one instance of it: an unrecognised engine event
+                    // used to vanish in silence, which is how llm.delta stayed broken while being
+                    // written down in three places.
+                    _deps.Logger.LogDebug(
+                        "Unhandled workflow event {EventType} on instance {InstanceId}.",
+                        evt.GetType().Name, instance.InstanceId);
+                    break;
             }
         }
 
@@ -237,6 +265,25 @@ public sealed class WorkflowRunner
             {
                 await TransitionAsync(instance, InstanceStatus.AwaitingApproval, null, cancellationToken).ConfigureAwait(false);
                 return new RunOutcome(InstanceStatus.AwaitingApproval, null, null, null);
+            }
+        }
+
+        // Same reasoning for an event wait: the executor halted and emitted nothing, so the stream
+        // ended with the graph unfinished. Without this the instance would look Completed while a
+        // downstream node had never run.
+        if (_deps.EventSubscriptions is { } subscriptions)
+        {
+            IReadOnlyList<EventSubscription> waits = await subscriptions.QueryAsync(new SubscriptionQuery
+            {
+                InstanceId = instance.InstanceId,
+                Kind = SubscriptionKind.Wait,
+                PendingOnly = true
+            }, cancellationToken).ConfigureAwait(false);
+
+            if (waits.Count > 0)
+            {
+                await TransitionAsync(instance, InstanceStatus.AwaitingInput, null, cancellationToken).ConfigureAwait(false);
+                return new RunOutcome(InstanceStatus.AwaitingInput, null, null, null);
             }
         }
 
@@ -296,6 +343,7 @@ public sealed class WorkflowRunner
         executor.Runtime = new HostExecutorRuntime
         {
             InstanceId = instance.InstanceId,
+            TenantId = instance.TenantId,
             Descriptor = descriptor,
             Attempt = invocation.Attempt,
             Pipeline = pipeline,
@@ -305,6 +353,10 @@ public sealed class WorkflowRunner
             Approvals = _deps.ApprovalService,
             Services = _deps.Services,
             Audit = audit,
+            Notify = new NodeNotifier(
+                instance.InstanceId, instance.TenantId, executor.Id,
+                _deps.Events, _deps.Sequencer, _notifications,
+                () => _currentSuperstep, _deps.Clock, instance.WorkflowName),
             ExecutorInvoked = async (executorId, superstep) =>
             {
                 _hostInvocationEvents.Enqueue(executorId);
@@ -418,6 +470,13 @@ public sealed class WorkflowRunner
             m.ClearLease = true;
         }, cancellationToken).ConfigureAwait(false);
 
+        // A wait outliving its instance would keep matching messages forever and log a warning for
+        // each one. Terminal means nothing is listening any more.
+        if (_deps.EventSubscriptions is { } subscriptions)
+        {
+            await subscriptions.RemoveForInstanceAsync(instance.InstanceId, cancellationToken).ConfigureAwait(false);
+        }
+
         await PublishAsync(instance, WorkflowEventTypes.WorkflowTerminated, new
         {
             status = status.ToString(),
@@ -438,11 +497,49 @@ public sealed class WorkflowRunner
 
     private ValueTask PublishAsync(
         WorkflowInstance instance, string eventType, object payload, string? executorId, CancellationToken cancellationToken)
-        => _deps.Events.PublishAsync(
+    {
+        // Before Next(), never after. A suppressed event that had already consumed a sequence number
+        // would leave a hole in the gapless sequence, and Last-Event-ID catch-up would wait forever
+        // for an event that is never coming.
+        if (!_notifications.ShouldEmit(eventType, executorId))
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        return _deps.Events.PublishAsync(
             EventFactory.Create(
                 instance.InstanceId, _deps.Sequencer.Next(instance.InstanceId), eventType, payload,
-                executorId, _currentSuperstep, instance.TenantId, _deps.Clock.GetUtcNow()),
+                executorId, _currentSuperstep, instance.TenantId, _deps.Clock.GetUtcNow(),
+                instance.WorkflowName, _notifications.DeliveryFor(EventDeliveryMode.StreamAndLog)),
             cancellationToken);
+    }
+
+    /// <summary>
+    /// Live fan-out with no durable record and no sequence number. Used for streamed tokens, where
+    /// the complete text is in the executor's output and a replayed chunk would mean nothing.
+    /// </summary>
+    private ValueTask PublishTransientAsync(
+        WorkflowInstance instance, string eventType, object payload, string? executorId, CancellationToken cancellationToken)
+    {
+        if (!_notifications.ShouldEmit(eventType, executorId))
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        // Stream-only under a log-only workflow means nowhere, which is the correct reading: opting
+        // out of streaming opts out of streamed tokens too.
+        if (_notifications.IsLogOnly)
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        return _deps.Events.PublishAsync(
+            EventFactory.Create(
+                instance.InstanceId, 0, eventType, payload,
+                executorId, _currentSuperstep, instance.TenantId, _deps.Clock.GetUtcNow(),
+                instance.WorkflowName, EventDeliveryMode.StreamOnly),
+            cancellationToken);
+    }
 
     private ValueTask LogAsync(
         WorkflowInstance instance, string level, string? executorId, Exception error, CancellationToken cancellationToken)

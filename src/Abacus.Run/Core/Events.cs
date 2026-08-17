@@ -113,10 +113,18 @@ public sealed class EventPublisher : IEventSink, IAsyncDisposable
                     continue;
                 }
 
-                await _store.AppendBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-                if (_bus is not null)
+                // Stream-only events reach live subscribers and leave no record; log-only events do
+                // the reverse. Each destination takes the subset that named it.
+                EventEnvelope[] durable = [.. batch.Where(e => e.Delivery != EventDeliveryMode.StreamOnly)];
+                if (durable.Length > 0)
                 {
-                    await _bus.PublishBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+                    await _store.AppendBatchAsync(durable, cancellationToken).ConfigureAwait(false);
+                }
+
+                EventEnvelope[] streamed = [.. batch.Where(e => e.Delivery != EventDeliveryMode.LogOnly)];
+                if (_bus is not null && streamed.Length > 0)
+                {
+                    await _bus.PublishBatchAsync(streamed, cancellationToken).ConfigureAwait(false);
                 }
             }
         }
@@ -161,8 +169,13 @@ public sealed class DirectEventSink : IEventSink
         ArgumentNullException.ThrowIfNull(envelope);
         EventEnvelope redacted = envelope with { PayloadJson = _redaction.RedactBody(envelope.PayloadJson) };
         EventEnvelope[] batch = [redacted];
-        await _store.AppendBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-        if (_bus is not null)
+
+        if (redacted.Delivery != EventDeliveryMode.StreamOnly)
+        {
+            await _store.AppendBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (_bus is not null && redacted.Delivery != EventDeliveryMode.LogOnly)
         {
             await _bus.PublishBatchAsync(batch, cancellationToken).ConfigureAwait(false);
         }
@@ -175,7 +188,8 @@ public static class EventFactory
 
     public static EventEnvelope Create(
         string instanceId, long sequence, string eventType, object payload,
-        string? executorId = null, int? superstep = null, string? tenantId = null, DateTimeOffset? at = null)
+        string? executorId = null, int? superstep = null, string? tenantId = null, DateTimeOffset? at = null,
+        string? workflowName = null, EventDeliveryMode delivery = EventDeliveryMode.StreamAndLog)
         => new()
         {
             InstanceId = instanceId,
@@ -184,6 +198,8 @@ public static class EventFactory
             ExecutorId = executorId,
             Superstep = superstep,
             TenantId = tenantId,
+            WorkflowName = workflowName,
+            Delivery = delivery,
             PayloadJson = JsonSerializer.Serialize(payload, Json),
             OccurredAt = at ?? DateTimeOffset.UtcNow
         };

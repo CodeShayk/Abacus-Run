@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Abacus.Run.Abstractions;
 using Abacus.Run.Core;
 using Microsoft.AspNetCore.Builder;
@@ -40,6 +41,65 @@ public sealed record DecisionRequestDto(string Decision, string? Comment, JsonEl
 public sealed record CancelRequestDto(string? Reason);
 
 public sealed record RerunRequestDto(string? Mode, JsonElement? Context, string? FromCheckpointId, string? Reason);
+
+/// <summary>
+/// One row of the event log. <c>PayloadJson</c> is re-emitted as a raw JSON value rather than an
+/// escaped string, so a caller reads the payload directly instead of parsing it twice.
+/// </summary>
+public sealed record EventLogDto(
+    string InstanceId,
+    string? WorkflowName,
+    long Sequence,
+    string EventType,
+    string? ExecutorId,
+    int? Superstep,
+    string? TenantId,
+    [property: JsonConverter(typeof(RawJsonConverter))] string PayloadJson,
+    DateTimeOffset OccurredAt);
+
+/// <summary>Writes an already-serialised JSON string through untouched.</summary>
+internal sealed class RawJsonConverter : JsonConverter<string>
+{
+    public override string Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => reader.GetString() ?? "{}";
+
+    public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(value);
+            document.RootElement.WriteTo(writer);
+        }
+        catch (JsonException)
+        {
+            // A payload that is not valid JSON is written as the string it is, rather than failing
+            // the whole response — one malformed row must not hide the rest of the log.
+            writer.WriteStringValue(value);
+        }
+    }
+}
+
+public sealed record PublishEventRequestDto(
+    string? Topic, JsonElement? Payload, string? CorrelationKey, string? Scope);
+
+public sealed record SubscriptionDto(
+    string SubscriptionId,
+    string Kind,
+    string TopicFilter,
+    string? CorrelationKey,
+    string? TenantId,
+    string? InstanceId,
+    string? ExecutorId,
+    string? WorkflowName,
+    bool Satisfied,
+    DateTimeOffset? ExpiresAt,
+    DateTimeOffset CreatedAt);
 
 public static class Endpoints
 {
@@ -103,7 +163,19 @@ public static class Endpoints
                     {
                         version = v.Version,
                         contextType = v.ContextType.Name,
-                        resultType = v.ResultType.Name
+                        resultType = v.ResultType.Name,
+
+                        // What a subscriber may expect from this workflow beyond the framework's own
+                        // events — discoverable, the way node descriptors already advertise gates.
+                        notifications = v.Definition is INotifyingWorkflow notifying
+                            ? new
+                            {
+                                level = notifying.Notifications.Level.ToString(),
+                                emits = notifying.Notifications.Emits
+                                    .Select(e => NodeNotifier.CustomPrefix + e)
+                                    .ToArray()
+                            }
+                            : null
                     })
                 });
         });
@@ -363,6 +435,17 @@ public static class Endpoints
                 return Results.NotFound();
             }
 
+            // A log-only workflow would hold this stream open and never write to it, which a client
+            // cannot tell apart from a stalled run. Refuse, and say where the events actually are.
+            if (NotificationsOf(services, instance) is { IsLogOnly: true })
+            {
+                return Results.Problem(
+                    title: "This workflow does not stream events",
+                    detail: $"'{instance.WorkflowName}' is configured for log-only delivery. Read its events at " +
+                            $"/v2/workflows/{instance.WorkflowName}/instances/{id}/events.",
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+
             long from = 0;
             string? lastEventId = http.Request.Headers["Last-Event-ID"].FirstOrDefault();
             if (long.TryParse(lastEventId, out long parsed))
@@ -501,6 +584,164 @@ public static class Endpoints
                     title: "Approval already decided", detail: result.Detail, statusCode: StatusCodes.Status409Conflict)
             };
         });
+
+        // Publishes a domain message from outside the engine, so an external system can start or
+        // resume a workflow without knowing which one is listening. Scoped Local by default: crossing
+        // the service boundary is something a caller asks for, not something an endpoint decides.
+        app.MapPost("/events", async (
+            PublishEventRequestDto body,
+            HttpContext http,
+            IEventBroker broker,
+            CancellationToken cancellationToken) =>
+        {
+            if (body is null)
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["topic"] = ["A topic is required."]
+                });
+            }
+
+            if (!TopicPattern.IsValidTopic(body.Topic, out string? topicError))
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["topic"] = [topicError!]
+                });
+            }
+
+            if (!Enum.TryParse(body.Scope ?? nameof(DeliveryScope.Local), ignoreCase: true, out DeliveryScope scope))
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["scope"] = [$"Must be one of: {nameof(DeliveryScope.Local)}, {nameof(DeliveryScope.Distributed)}."]
+                });
+            }
+
+            if (scope == DeliveryScope.Distributed && !broker.Capabilities.SupportsDistributed)
+            {
+                return Results.Problem(
+                    title: "Distributed delivery is not configured",
+                    detail: "The registered broker delivers within this service only. Publish as Local, " +
+                            "or configure a distributed broker.",
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            // An idempotency key becomes the message id, so a retried publish is the same message
+            // rather than a second one — consumers deduplicate on it.
+            string messageId = http.Request.Headers["Idempotency-Key"].FirstOrDefault() is { Length: > 0 } key
+                ? key
+                : IdGenerator.NewId("msg");
+
+            var message = new BrokerMessage
+            {
+                MessageId = messageId,
+                Topic = body.Topic!,
+                PayloadJson = body.Payload?.GetRawText() ?? "{}",
+                Scope = scope,
+                CorrelationKey = body.CorrelationKey,
+                TenantId = http.TenantId()
+            };
+
+            await broker.PublishAsync(message, cancellationToken).ConfigureAwait(false);
+
+            return Results.Accepted(value: new { messageId = message.MessageId, topic = message.Topic });
+        });
+
+        // The event log as a queryable record rather than a stream. This is the read path for a
+        // log-only workflow, and works just as well for a streamed one — the same rows either way.
+        // Scoped by workflow name, matching the instance-state route, so the caller states which
+        // workflow they believe they are reading and a mismatch is caught rather than assumed.
+        app.MapGet("/v2/workflows/{name}/instances/{id}/events", async (
+            string name,
+            string id,
+            [FromQuery] long? from,
+            [FromQuery] long? to,
+            [FromQuery] int? limit,
+            [FromQuery] string? types,
+            IInstanceStore instances,
+            IEventStore store,
+            CancellationToken cancellationToken) =>
+        {
+            WorkflowInstance? instance = await instances.GetAsync(id, cancellationToken).ConfigureAwait(false);
+            if (instance is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (!string.Equals(instance.WorkflowName, name, StringComparison.OrdinalIgnoreCase))
+            {
+                return Results.Problem(
+                    title: "Workflow mismatch",
+                    detail: $"Instance '{id}' belongs to '{instance.WorkflowName}', not '{name}'.",
+                    statusCode: StatusCodes.Status404NotFound);
+            }
+
+            string[]? typeFilter = types?
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            Page<EventEnvelope> page = await store.QueryAsync(
+                new EventQuery(id, from ?? 0, to, Math.Clamp(limit ?? 100, 1, 1000), typeFilter), cancellationToken)
+                .ConfigureAwait(false);
+
+            return Results.Ok(new
+            {
+                instanceId = id,
+                workflowName = instance.WorkflowName,
+                workflowVersion = instance.WorkflowVersion,
+                tenantId = instance.TenantId,
+                total = page.Total,
+                nextCursor = page.NextCursor,
+
+                // WorkflowName is denormalised onto each row too, so a caller collecting events from
+                // several instances keeps the attribution without carrying the envelope's context.
+                items = page.Items.Select(e => new EventLogDto(
+                    e.InstanceId, e.WorkflowName ?? instance.WorkflowName, e.Sequence, e.EventType,
+                    e.ExecutorId, e.Superstep, e.TenantId, e.PayloadJson, e.OccurredAt))
+            });
+        });
+
+        // What is listening, and what is waiting. An instance parked on an event with no visible
+        // reason is the worst version of this feature.
+        app.MapGet("/subscriptions", async (
+            [FromQuery] string? instanceId,
+            [FromQuery] string? topic,
+            [FromQuery] string? kind,
+            [FromQuery] bool? pendingOnly,
+            [FromQuery] int? limit,
+            HttpContext http,
+            IEventSubscriptionStore subscriptions,
+            CancellationToken cancellationToken) =>
+        {
+            SubscriptionKind? parsedKind = null;
+            if (kind is { Length: > 0 })
+            {
+                if (!Enum.TryParse(kind, ignoreCase: true, out SubscriptionKind value))
+                {
+                    return Results.ValidationProblem(new Dictionary<string, string[]>
+                    {
+                        ["kind"] = [$"Must be one of: {nameof(SubscriptionKind.Trigger)}, {nameof(SubscriptionKind.Wait)}."]
+                    });
+                }
+                parsedKind = value;
+            }
+
+            if (topic is { Length: > 0 } && !TopicPattern.IsValidTopic(topic, out string? topicError))
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["topic"] = [topicError!] });
+            }
+
+            IReadOnlyList<EventSubscription> items = await subscriptions.QueryAsync(new SubscriptionQuery
+            {
+                InstanceId = instanceId,
+                Topic = topic,
+                Kind = parsedKind,
+                PendingOnly = pendingOnly ?? false,
+                Limit = Math.Clamp(limit ?? 50, 1, 200)
+            }, cancellationToken).ConfigureAwait(false);
+
+            return Results.Ok(new { items = items.Select(s => s.ToDto()) });
+        });
     }
 
     /// <summary>
@@ -596,6 +837,30 @@ public static class Endpoints
         approval.ApprovalId, approval.InstanceId, approval.ExecutorId, approval.Reason, approval.State.ToString(),
         approval.Assignees, approval.RequiredApprovers, approval.AllowModification, approval.CreatedAt,
         approval.ExpiresAt, $"/approvals/{approval.ApprovalId}/decision");
+
+    /// <summary>
+    /// The notification policy the instance's own workflow version declared, or null when it
+    /// declared none. Resolved by the instance's version, not the newest, so an in-flight run keeps
+    /// the behaviour it started under.
+    /// </summary>
+    private static NotificationPolicy? NotificationsOf(IServiceProvider services, WorkflowInstance instance)
+    {
+        var registry = services.GetService<IWorkflowRegistry>();
+
+        return registry?.Resolve(instance.WorkflowName, instance.WorkflowVersion)?.Definition
+            is INotifyingWorkflow notifying
+                ? notifying.Notifications
+                : null;
+    }
+
+    /// <summary>
+    /// The delivered payload is deliberately absent: it is domain data that has already been
+    /// redacted on its way to the event stream, and repeating it unredacted here would undo that.
+    /// </summary>
+    public static SubscriptionDto ToDto(this EventSubscription subscription) => new(
+        subscription.SubscriptionId, subscription.Kind.ToString(), subscription.TopicFilter,
+        subscription.CorrelationKey, subscription.TenantId, subscription.InstanceId, subscription.ExecutorId,
+        subscription.WorkflowName, subscription.IsSatisfied, subscription.ExpiresAt, subscription.CreatedAt);
 
     public static IResult ToHttpResult(this GateConfigResult result) => result.Kind switch
     {

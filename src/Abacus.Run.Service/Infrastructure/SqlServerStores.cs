@@ -40,6 +40,10 @@ public sealed class AbacusDbContext(DbContextOptions<AbacusDbContext> options) :
             entity.HasKey(row => new { row.InstanceId, row.Sequence });
             entity.Property(row => row.Payload).IsRequired();
             entity.HasIndex(row => row.EventType);
+
+            // Supports reading a workflow's log across instances, which is the query the
+            // denormalised column exists for.
+            entity.HasIndex(row => new { row.WorkflowName, row.OccurredAt });
         });
 
         modelBuilder.Entity<JsonRow>(entity =>
@@ -72,6 +76,12 @@ public sealed class EventRow
     public required string InstanceId { get; set; }
     public required long Sequence { get; set; }
     public required string EventType { get; set; }
+
+    /// <summary>
+    /// Denormalised from the instance so the log can be filtered by workflow without a join. Nullable
+    /// because rows written before this column existed do not have it.
+    /// </summary>
+    public string? WorkflowName { get; set; }
     public string? TenantId { get; set; }
     public string? ExecutorId { get; set; }
     public int? Superstep { get; set; }
@@ -279,6 +289,7 @@ public sealed class SqlServerEventStore(IDbContextFactory<AbacusDbContext> facto
                 InstanceId = envelope.InstanceId,
                 Sequence = envelope.Sequence,
                 EventType = envelope.EventType,
+                WorkflowName = envelope.WorkflowName,
                 TenantId = envelope.TenantId,
                 ExecutorId = envelope.ExecutorId,
                 Superstep = envelope.Superstep,

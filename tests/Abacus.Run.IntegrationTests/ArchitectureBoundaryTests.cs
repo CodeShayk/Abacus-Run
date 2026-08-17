@@ -1,5 +1,7 @@
 using System.Reflection;
+using Abacus.Run.Abstractions;
 using Abacus.Run.Api;
+using Abacus.Run.EventBus;
 using Abacus.Run.Service.ControlPlane;
 using Abacus.Run.Core;
 using Abacus.Run.Persistence;
@@ -64,6 +66,7 @@ public class ArchitectureBoundaryTests
         typeof(InstanceLauncher).Assembly.Should().BeSameAs(Library);
         typeof(WorkflowHostBuilder).Assembly.Should().BeSameAs(Library);
         typeof(InMemoryEventBus).Assembly.Should().BeSameAs(Library);
+        typeof(InProcessEventBroker).Assembly.Should().BeSameAs(Library);
         typeof(InMemoryInstanceStore).Assembly.Should().BeSameAs(Library);
         typeof(OverflowCheckpointStore).Assembly.Should().BeSameAs(Library);
     }
@@ -90,7 +93,8 @@ public class ArchitectureBoundaryTests
         Type[] contracts =
         [
             typeof(IInstanceStore), typeof(IEventStore), typeof(ILogStore), typeof(IApprovalStore),
-            typeof(IGatePolicyStore), typeof(IAuditStore), typeof(IBlobStore), typeof(IEventBus)
+            typeof(IGatePolicyStore), typeof(IAuditStore), typeof(IBlobStore), typeof(IEventBus),
+            typeof(IEventBroker), typeof(IEventSubscriptionStore)
         ];
 
         string[] adapters = Host.GetTypes()
@@ -100,8 +104,14 @@ public class ArchitectureBoundaryTests
             .ToArray();
 
         adapters.Should().NotBeEmpty("the host exists to supply concrete infrastructure");
+
+        // The prefix is the technology the adapter speaks. Adding one here is a deliberate act;
+        // an adapter named for what it does rather than what it talks to is framework logic that
+        // has drifted back into the deployable.
+        string[] technologies = ["SqlServer", "Redis", "RabbitMq", "Sqlite"];
+
         adapters.Should().OnlyContain(
-            n => n.StartsWith("SqlServer", StringComparison.Ordinal) || n.StartsWith("Redis", StringComparison.Ordinal));
+            n => technologies.Any(t => n.StartsWith(t, StringComparison.Ordinal)));
     }
 
     [Fact]

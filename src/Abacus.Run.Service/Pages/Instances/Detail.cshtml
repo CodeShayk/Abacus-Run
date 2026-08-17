@@ -80,6 +80,35 @@
     </div>
 </div>
 
+@if (Model.Waiting.Count > 0)
+{
+    @* An instance parked on an event otherwise reads as AwaitingInput with no stated cause. *@
+    <div class="waiting-panel">
+        <h3>Waiting on</h3>
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Topic</th>
+                    <th>Node</th>
+                    <th>Correlation</th>
+                    <th>Expires</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var wait in Model.Waiting)
+                {
+                    <tr>
+                        <td><span class="event-type">@wait.TopicFilter</span></td>
+                        <td>@(wait.ExecutorId ?? "—")</td>
+                        <td>@(wait.CorrelationKey ?? "any")</td>
+                        <td>@(wait.ExpiresAt?.ToString("u") ?? "never")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
 <div class="detail-tabs">
     <nav class="tab-nav" role="tablist">
         <button class="tab active" role="tab" data-tab="graph" aria-selected="true">Graph</button>
