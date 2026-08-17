@@ -8,7 +8,7 @@ workflow behaves; the DSL is a second front end onto the runtime that already ex
 | # | Phase | Delivers | Depends on | Status |
 | - | ----- | -------- | ---------- | ------ |
 | 1 | Envelope and expression core | `DslMessage`, AbEx parser and evaluator | — | ✅ Done — 207 tests |
-| 2 | Document model and validation | Parser, JSON Schema, semantic validator, diagnostics | 1 | ⬜ Not started |
+| 2 | Document model and validation | Parser, JSON Schema, semantic validator, diagnostics | 1 | ✅ Done — 317 tests |
 | 3 | Interpreter | `DslWorkflowDefinition`, node factories, graph construction | 1, 2 | ⬜ Not started |
 | 4 | Host integration | Registration, `IContextValidatingWorkflow`, catalog and validate endpoints | 3 | ⬜ Not started |
 | 5 | Documentation and worked example | Wiki chapter, README, a shipped example document | 4 | ⬜ Not started |
