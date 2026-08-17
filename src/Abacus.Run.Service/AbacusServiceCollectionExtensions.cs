@@ -89,7 +89,7 @@ public static class AbacusServiceCollectionExtensions
         // both, or neither.
         if (!string.IsNullOrWhiteSpace(options.RabbitMqConnectionString))
         {
-            services.AddRabbitMqDomainEventBroker(options.RabbitMqConnectionString);
+            services.AddRabbitMqMessaging(options.RabbitMqConnectionString);
         }
 
         return host;

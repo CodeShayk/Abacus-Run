@@ -153,13 +153,21 @@ public static class HostBuilderExtensions
         services.TryAddSingleton<INotificationBus>(sp => sp.GetRequiredService<ICacheAdapter>().NotificationBackplane);
         services.TryAddSingleton<ICacheStore>(sp => sp.GetRequiredService<ICacheAdapter>().Store);
 
-        // The broker is a separate concern from INotificationBus: that one fans instance progress out to
-        // SSE, this one carries domain messages between workflows. Local delivery by default; a
-        // distributed transport substitutes for cross-service pub/sub.
+        // Messaging, as one substitution — the mirror of caching above. The adapter supplies every
+        // messaging capability, so registering Abacus.Adapters.Messaging.RabbitMQ (or AWS, or
+        // anything else) moves domain events and control signalling together. In-process by
+        // default, which is correct for a single service.
         services.TryAddSingleton<InProcessDomainEventBroker>(sp => new InProcessDomainEventBroker(
             sp.GetService<ILogger<InProcessDomainEventBroker>>(),
             sp.GetRequiredService<TimeProvider>()));
-        services.TryAddSingleton<IDomainEventBroker>(sp => sp.GetRequiredService<InProcessDomainEventBroker>());
+
+        services.TryAddSingleton<IMessagingAdapter>(sp => new InProcessMessagingAdapter(
+            sp.GetRequiredService<InProcessDomainEventBroker>(),
+            sp.GetService<ILoggerFactory>(),
+            sp.GetRequiredService<TimeProvider>()));
+
+        services.TryAddSingleton<IDomainEventBroker>(sp => sp.GetRequiredService<IMessagingAdapter>().DomainEventBroker);
+        services.TryAddSingleton<IControlChannel>(sp => sp.GetRequiredService<IMessagingAdapter>().ControlChannel);
 
         // Token prices, bound from Abacus:Llm:Pricing:<model>. Absent by default: a host that has
         // not been told its rates reports cost as unknown rather than as zero.

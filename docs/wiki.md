@@ -173,10 +173,10 @@ src/Abacus.Run/               src/Abacus.Run.Service/
   Persistence/                  Program.cs
                                 AbacusServiceCollectionExtensions.cs
 
-src/Abacus.Adapters.Cache.Redis/     src/Abacus.Adapters.Messaging.RabbitMQ/
+src/Abacus.Adapters.Cache.Redis/      src/Abacus.Adapters.Messaging.RabbitMQ/
+  RedisCacheAdapter.cs                  RabbitMqMessagingAdapter.cs
   RedisNotificationBus.cs               RabbitMqDomainEventBroker.cs
-  RedisEventBroker.cs            RabbitMqServiceCollectionExtensions.cs
-  RedisServiceCollectionExtensions.cs
+  RedisServiceCollectionExtensions.cs   RabbitMqServiceCollectionExtensions.cs
 ```
 
 ### Where the line falls
@@ -1258,8 +1258,7 @@ The same publishing code is therefore correct in a single service and in a fleet
 | Transport | Reach | Competing consumers | Replay | Dead letter |
 | --- | --- | --- | --- | --- |
 | `InProcessDomainEventBroker` *(default)* | This service | Yes | No | No |
-| `RedisEventBroker` *(`AddRedisEventBroker`)* | Every service | Yes | Yes | Yes |
-| `RabbitMqDomainEventBroker` *(`AddRabbitMqDomainEventBroker`)* | Every service | Yes | No | Yes |
+| `RabbitMqMessagingAdapter` *(`AddRabbitMqMessaging`)* | Every service | Yes | No | Yes |
 
 Each distributed broker is the in-process broker *plus a wire*, not a second implementation. Local messages never leave the process. Distributed ones go onto the transport and come back to every service through its own consumer, including the publisher's own — publishing does not also deliver locally, because that would deliver twice. Consumer groups carry the distinction between routing work and observing it: a named `ConsumerGroup` means exactly one member of the fleet handles each message, an unnamed one gets a private group and sees its own copy.
 
@@ -1804,7 +1803,7 @@ An envelope marked `Transient` must be relayed but **not** persisted, and carrie
 
 ### Custom event brokers
 
-Implement `IDomainEventBroker` to carry domain messages over a transport of your choosing — Azure Service Bus, Kafka, NATS. Register it in place of the default `InProcessDomainEventBroker`. `RedisEventBroker` and `RabbitMqDomainEventBroker` are the two worked examples, and they differ enough to be worth reading as a pair: one filters client-side and can replay, the other filters at the exchange and cannot.
+Implement `IMessagingAdapter` to carry messaging over a transport of your choosing — AWS, Azure Service Bus, Kafka, NATS. The adapter supplies every messaging capability (`IDomainEventBroker` and `IControlChannel`), so registering it substitutes them together and the framework needs no change to accommodate a new transport. `RabbitMqMessagingAdapter` is the worked example; `Abacus.Adapters.Messaging.AWS` would follow exactly the same shape.
 
 Three obligations:
 

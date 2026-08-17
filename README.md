@@ -163,14 +163,13 @@ public static WorkflowHostBuilder AddAbacus(this IServiceCollection services, IC
 
     if (configuration["Abacus:Redis:ConnectionString"] is { Length: > 0 } redis)
     {
-        services.AddRedisNotificationBus(redis, maxStreamLength: 10_000);      // SSE fan-out across replicas
-        services.AddRedisEventBroker(redis, maxStreamLength: 100_000);  // cross-service pub/sub
+        services.AddRedisCache(redis);      // cache adapter: general cache + SSE backplane
     }
 
-    // Or RabbitMQ instead of the Redis broker — one or the other, not both.
+    // Messaging is chosen independently of caching.
     if (configuration["Abacus:RabbitMq:ConnectionString"] is { Length: > 0 } amqp)
     {
-        services.AddRabbitMqDomainEventBroker(amqp);
+        services.AddRabbitMqMessaging(amqp);   // messaging adapter: domain events + control signals
     }
 
     return host;
@@ -406,15 +405,14 @@ days.
 
 Topic filters use `*` for one segment and `#` for the remainder. Scope travels on the message —
 `Local` by default, so the same publishing code is correct in one service and in a fleet.
-`InProcessDomainEventBroker` is registered by default; `AddRedisEventBroker` or `AddRabbitMqDomainEventBroker`
-replaces it for cross-service pub/sub, and an impossible combination is rejected at composition time
+`InProcessMessagingAdapter` is registered by default; `AddRabbitMqMessaging` replaces it for
+cross-service pub/sub, and an impossible combination is rejected at composition time
 rather than failing silently in production.
 
 | Transport | Reach | Competing consumers | Replay | Dead letter |
 | --- | --- | --- | --- | --- |
-| `InProcessDomainEventBroker` *(default)* | This service | Yes | No | No |
-| `RedisEventBroker` | Every service | Yes | Yes | Yes |
-| `RabbitMqDomainEventBroker` | Every service | Yes | No | Yes |
+| `InProcessMessagingAdapter` *(default)* | This service | Yes | No | No |
+| `RabbitMqMessagingAdapter` | Every service | Yes | No | Yes |
 
 Redis filters client-side and can replay from a stream. RabbitMQ filters server-side at a topic
 exchange, so a subscriber is never woken for a message it would discard, and reports
@@ -572,10 +570,10 @@ src/Abacus.Run/               src/Abacus.Run.Service/
   Persistence/                  Program.cs
                                 AbacusServiceCollectionExtensions.cs
 
-src/Abacus.Adapters.Cache.Redis/     src/Abacus.Adapters.Messaging.RabbitMQ/
+src/Abacus.Adapters.Cache.Redis/      src/Abacus.Adapters.Messaging.RabbitMQ/
+  RedisCacheAdapter.cs                  RabbitMqMessagingAdapter.cs
   RedisNotificationBus.cs               RabbitMqDomainEventBroker.cs
-  RedisEventBroker.cs            RabbitMqServiceCollectionExtensions.cs
-  RedisServiceCollectionExtensions.cs
+  RedisServiceCollectionExtensions.cs   RabbitMqServiceCollectionExtensions.cs
 ```
 
 Each adapter references `Abacus.Run` and its own client library — nothing else. It does not reference
