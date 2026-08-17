@@ -896,5 +896,5 @@ public static class Endpoints
     public static string TenantId(this HttpContext http)
         => http.Request.Headers["X-Tenant-Id"].FirstOrDefault()
            ?? http.User?.FindFirst("tenant_id")?.Value
-           ?? "default";
+           ?? Tenancy.Default;
 }

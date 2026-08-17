@@ -65,6 +65,17 @@ public sealed class InstanceLauncher : IInstanceLauncher
             return new StartResult(StartResultKind.UnknownWorkflow);
         }
 
+        // Definitions are global, but an instance is somebody's work. Starting one "for all tenants"
+        // would create a row no tenant-filtered query returns and every tenant could arguably see —
+        // so it is refused rather than quietly owned by a tenant literally named "0".
+        if (!Tenancy.CanOwnInstance(tenantId))
+        {
+            return new StartResult(StartResultKind.InvalidContext, Errors: new Dictionary<string, string[]>
+            {
+                ["tenantId"] = [$"'{Tenancy.AllTenants}' is the all-tenants scope and cannot own an instance."]
+            });
+        }
+
         ContextValidationResult validation = _registry.ValidateContext(descriptor, request.Context);
         if (!validation.IsValid)
         {

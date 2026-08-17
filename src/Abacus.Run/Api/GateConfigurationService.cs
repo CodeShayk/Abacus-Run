@@ -186,7 +186,7 @@ public sealed class GateConfigurationService : IGateConfigurationService
         foreach ((WorkflowNodeDescriptor node, ApprovalGate gate) in resolved)
         {
             await _policies
-                .SetAsync(tenantId, descriptor.Name, descriptor.Version, node.ExecutorId, gate, cancellationToken)
+                .SetAsync(Tenancy.Normalize(tenantId), descriptor.Name, descriptor.Version, node.ExecutorId, gate, cancellationToken)
                 .ConfigureAwait(false);
 
             await AuditAsync("gate.policy.set", descriptor, tenantId, node.ExecutorId, user, gate.Mode.ToString(), cancellationToken)
@@ -217,7 +217,7 @@ public sealed class GateConfigurationService : IGateConfigurationService
         }
 
         await _policies
-            .RemoveAsync(tenantId, descriptor.Name, descriptor.Version, executorId, cancellationToken)
+            .RemoveAsync(Tenancy.Normalize(tenantId), descriptor.Name, descriptor.Version, executorId, cancellationToken)
             .ConfigureAwait(false);
 
         await AuditAsync("gate.policy.reset", descriptor, tenantId, executorId, user, null, cancellationToken)
@@ -241,7 +241,7 @@ public sealed class GateConfigurationService : IGateConfigurationService
             await _inspector.InspectAsync(descriptor, cancellationToken).ConfigureAwait(false);
 
         IReadOnlyDictionary<string, ApprovalGate> tenantPolicies = await _policies
-            .ListAsync(tenantId, descriptor.Name, descriptor.Version, cancellationToken).ConfigureAwait(false);
+            .ListAsync(Tenancy.Normalize(tenantId), descriptor.Name, descriptor.Version, cancellationToken).ConfigureAwait(false);
 
         IReadOnlyDictionary<string, ApprovalGate> hostPolicies = await _policies
             .ListAsync(null, descriptor.Name, descriptor.Version, cancellationToken).ConfigureAwait(false);
