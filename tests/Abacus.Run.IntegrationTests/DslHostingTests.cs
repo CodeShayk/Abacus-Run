@@ -178,6 +178,60 @@ public class DslRegistrationTests
         }
     }
 
+    /// <summary>
+    /// The document shipped beside the compiled example. It is documentation people will copy, so a
+    /// change that invalidates it should fail here rather than in someone's editor.
+    /// </summary>
+    [Fact]
+    public void The_shipped_example_document_is_valid()
+    {
+        string? root = FindRepositoryRoot();
+        root.Should().NotBeNull();
+
+        string path = Path.Combine(root!, "src", "Abacus.Run.Service", "Workflows",
+            "ExampleOrder", "example-order.workflow.json");
+
+        File.Exists(path).Should().BeTrue($"the shipped example should be at {path}");
+
+        DslParseResult result = DslParser.ParseFile(path, new DslEnvironment { EnforceEgress = false });
+
+        result.IsValid.Should().BeTrue(result.Validation.Describe());
+        result.Document!.Name.Should().Be("example-order-dsl");
+    }
+
+    [Fact]
+    public void The_shipped_example_document_registers_and_builds()
+    {
+        string? root = FindRepositoryRoot();
+        string path = Path.Combine(root!, "src", "Abacus.Run.Service", "Workflows",
+            "ExampleOrder", "example-order.workflow.json");
+
+        using ServiceProvider provider = Build(host => host
+            .ConfigureDsl(r => r.EnforceEgress = false)
+            .AddDslWorkflow(path));
+
+        IWorkflowDefinition[] definitions = [.. provider.GetServices<IWorkflowDefinition>()];
+        definitions.Should().ContainSingle();
+        definitions[0].Name.Should().Be("example-order-dsl");
+    }
+
+    private static string? FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+
+        while (directory is not null)
+        {
+            if (Directory.Exists(Path.Combine(directory.FullName, "docs", "schema")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        return null;
+    }
+
     [Fact]
     public void Registering_a_duplicate_node_name_is_refused()
     {

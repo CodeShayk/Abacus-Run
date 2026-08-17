@@ -11,13 +11,13 @@ workflow behaves; the DSL is a second front end onto the runtime that already ex
 | 2 | Document model and validation | Parser, JSON Schema, semantic validator, diagnostics | 1 | ✅ Done |
 | 3 | Interpreter | `DslWorkflowDefinition`, node factories, graph construction | 1, 2 | ✅ Done |
 | 4 | Host integration | Registration, `IContextValidatingWorkflow`, catalog and validate endpoints | 3 | ✅ Done |
-| 5 | Documentation and worked example | Wiki chapter, README, a shipped example document | 4 | ⬜ Not started |
+| 5 | Documentation and worked example | Wiki chapter, README, a shipped example document | 4 | ✅ Done |
 | 6 | Deferred | Runtime publication API, sub-workflows, iteration | 5 | ⬜ Out of scope |
 
 ## Status
 
-Phases 1–4 landed. Suites green: **723 unit** (unchanged), **358 DSL unit**, **201 integration**
-(+51), **7 chaos**.
+Phases 1–5 landed. Suites green: **723 unit** (unchanged), **358 DSL unit**, **209 integration**
+(+59), **7 chaos**.
 
 | Delivered | Where |
 | --------- | ----- |
@@ -31,6 +31,8 @@ Phases 1–4 landed. Suites green: **723 unit** (unchanged), **358 DSL unit**, *
 | `IContextValidatingWorkflow`, consulted after the type bind | [Core/WorkflowRegistry.cs](../../src/Abacus.Run/Core/WorkflowRegistry.cs) |
 | `ITemplateBindingSource` | [Executors/TemplateEngine.cs](../../src/Abacus.Run/Executors/TemplateEngine.cs) |
 | `/dsl/schema`, `/dsl/nodes`, `/dsl/functions`, `/dsl/documents`, `/dsl/validate` | [Hosting/DslEndpoints.cs](../../src/Abacus.Run.Dsl/Hosting/DslEndpoints.cs) |
+| Wiki chapter, README section, project-layout rows | [wiki.md](../wiki.md#authoring-with-the-dsl), [README.md](../../README.md) |
+| Shipped example document | [example-order.workflow.json](../../src/Abacus.Run.Service/Workflows/ExampleOrder/example-order.workflow.json) |
 
 ### Deviations from the plan as written
 
@@ -59,6 +61,15 @@ It does not: `FanInEdgeRunner` type-checks the target against the *individual* m
 the released messages separately. The DSL node therefore holds arrivals and emits once the last one
 lands, with the expected count read from the document. See the note below — the framework's own
 `FanInExecutor<TItem, TOut>` has the same problem and does not work with a barrier edge.
+
+**The parity test is not `ExampleOrderWorkflow`.** The plan said to express the shipped example as a
+document and assert both produce the same result. It cannot be expressed: `ExampleOrderWorkflow` sums
+an array of order lines, and the DSL has no iteration — which is exactly the limitation §11 of the
+design records, found by trying to hit it. The parity pair is instead a purpose-built workflow
+authored both ways, which still makes the point it was there to make: same runtime, same answer, two
+front ends. It also pins decimal arithmetic across both, where a DSL quietly using binary floating
+point would diverge. The shipped `example-order.workflow.json` is a document the DSL *can* express,
+covered by tests asserting it validates and registers.
 
 **Trigger `correlationKey` is a literal, not an expression.** A trigger subscription is registered
 before any message exists, so there is nothing for a path to read. The validator now warns when one

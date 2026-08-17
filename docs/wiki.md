@@ -17,6 +17,9 @@ This page is the repository-level technical wiki. It documents the implementatio
   - [Edges](#edges) · [Approval gates on a node](#approval-gates-on-a-node) · [Events on a node](#events-on-a-node)
   - [Failure classification](#failure-classification) · [Engine context](#engine-context-inside-an-executor) · [Middleware](#middleware)
   - [A definition using all of it](#a-definition-using-all-of-it) · [Versioning rules](#versioning-rules-that-bite)
+- [Authoring with the DSL](#authoring-with-the-dsl)
+  - [Which one to reach for](#which-one-to-reach-for) · [The envelope](#the-envelope) · [AbEx](#abex-the-expression-language)
+  - [Node kinds](#node-kinds) · [Custom nodes](#custom-nodes--the-extension-seam) · [Validation](#validation)
 - [Workflow audit records](#workflow-audit-records)
 - [Registering workflows and middleware](#registering-workflows-and-middleware)
 - [Instance lifecycle](#instance-lifecycle)
@@ -671,6 +674,301 @@ public sealed class OrderWorkflow
   which is the one case where a rerun can behave differently from the original.
 - Two definitions registered with the same name and version fail startup rather than one silently
   winning.
+
+
+## Authoring with the DSL
+
+Everything above authors a workflow in C#. This authors one as a **JSON document**: validated against
+a published schema, interpreted at build time, and registered exactly like a compiled definition.
+Nothing about the runtime changes — same graph, same executors, same gates, same events.
+
+> **The governing rule: the DSL composes, it never computes.**
+>
+> A document declares *which* nodes exist, *how* they connect, and *when* an edge is taken. It never
+> carries behaviour. Every unit of work a DSL workflow performs is a capability the host already
+> shipped — a built-in node kind, or a custom node registered by name.
+
+That is what makes a document safe to accept from outside the build and honest about its ceiling.
+The answer to "the DSL cannot express this" is always *register a node*, never *embed a script*.
+
+### Which one to reach for
+
+They are peers, not a replacement. A realistic system uses both: engineers ship nodes, and workflows
+wire them together.
+
+| | Compiled definition | DSL document |
+| --- | --- | --- |
+| **Authored by** | An engineer with a build pipeline | Anyone with the schema |
+| **Expresses** | Arbitrary behaviour | Composition of registered behaviour |
+| **Typing** | Compile-time, generic | Runtime, JSON Schema per node |
+| **Changed by** | A release | An edited document |
+| **Ceiling** | The language | The registered node catalog |
+| **Best for** | Domain logic, novel executors | Orchestration, per-tenant variation, fast iteration |
+
+### A document end to end
+
+```json
+{
+  "dsl": "abacus.workflow/1.0",
+  "name": "order-settlement",
+  "version": "1.2.0",
+
+  "context": {
+    "type": "object",
+    "required": ["orderId", "amount"],
+    "properties": { "orderId": { "type": "string" }, "amount": { "type": "number" } }
+  },
+
+  "start": "price",
+  "output": ["settle"],
+
+  "nodes": [
+    { "id": "price", "kind": "transform",
+      "set": { "total": "$ctx.amount * 1.2" },
+      "notify": { "name": "priced", "payload": { "total": "$.total" } } },
+
+    { "id": "settle", "kind": "http",
+      "method": "POST",
+      "url": "https://ledger.internal/v1/settlements",
+      "allowedHosts": ["ledger.internal"],
+      "body": "{\"order\":\"{{ $ctx.orderId }}\",\"amount\":{{ $.total }}}",
+      "gate": {
+        "mode": "conditional",
+        "when": "$.total > 25000",
+        "reason": "RegulatedSettlement",
+        "assignTo": ["group:finance"],
+        "expiresAfter": "PT8H",
+        "onExpiry": { "action": "escalate", "assignTo": ["group:exec"] },
+        "locked": true
+      } }
+  ],
+
+  "edges": [ { "from": "price", "to": "settle", "when": "$.total > 0" } ],
+
+  "triggers":      [ { "topic": "orders.placed" } ],
+  "notifications": { "level": "standard", "stream": true },
+  "onFailure":     [ { "match": { "exception": "ApiCallFailureException", "status": "5xx" },
+                       "disposition": "retry" } ],
+  "audit":         { "sections": ["submission", "outcome"] },
+  "limits":        { "maxAttempts": 5 }
+}
+```
+
+`dsl` is a versioned media identifier, not decoration: it selects the schema and the interpreter, and
+a major version this interpreter does not read is refused rather than half-understood.
+
+### The envelope
+
+Every DSL node sends and receives one message type, so every edge type-checks by construction:
+
+```json
+{ "ctx":  { "orderId": "ORD-1", "amount": 100 },
+  "data": { "total": 120 },
+  "meta": { "node": "price", "superstep": 1 } }
+```
+
+- **`ctx`** — the start context, frozen at the beginning and copied through unchanged. This is why an
+  expression eleven nodes deep can still read `$ctx.orderId`. A compiled node closes over whatever
+  C# scope it likes; a document has no scope, so the envelope carries one.
+- **`data`** — the current value: what a node reads and what it replaces.
+- **`meta`** — provenance the interpreter maintains.
+
+The workflow's **result is `data`**, not the envelope. The context is machinery, not an answer.
+
+### AbEx, the expression language
+
+Conditions, guards, correlation keys and projections all need some computation. The grammar is
+closed: total (no exceptions), pure (no I/O), and statically checkable, so a typo fails a document
+review rather than a production run.
+
+**Roots.** `$` is the current `data`, `$ctx` the frozen start context, `$run` the run's identity
+(`instanceId`, `tenantId`, `workflow`, `version`, `attempt`, `superstep`, `now`).
+
+There is deliberately no `$node.<id>`. The engine is message-passing, so a prior node's output is not
+ambiently available and a root that pretended otherwise would be a lie. Carry values forward in
+`data` — that is what a `transform` node is for.
+
+**Operators**, loosest to tightest: `||`, `&&`, comparison, `+ -`, `* / %`, unary `!` and `-`.
+Comparison is non-associative: `a < b < c` is refused rather than silently comparing a boolean to a
+number.
+
+**Functions** — the whole list, and an unknown name is a validation error with a nearest-match
+suggestion:
+
+| Function | Result |
+| --- | --- |
+| `len(x)` | Length of a string, array or object; `0` otherwise |
+| `has(path)` | Whether the path resolved to anything at all |
+| `lower(s)` / `upper(s)` | Case folding, invariant culture |
+| `contains(s, sub)`, `startsWith(s, p)`, `endsWith(s, p)` | Ordinal string tests |
+| `matches(s, pattern)` | Regex. The pattern must be a **string literal**, and matching times out at 200 ms |
+| `coalesce(a, b, …)` | First argument that is neither absent nor null |
+| `number(x)`, `string(x)`, `bool(x)` | Explicit coercion |
+
+**Semantics worth knowing before you are surprised by them:**
+
+- **Absence is a value.** A path that does not resolve yields *absent*, which never throws.
+- **Absence makes every comparison false — including `!=`.** Asking whether a field you never set
+  differs from a value should not be answered "yes". Use `has()` to ask about presence.
+- **Conditions are strictly boolean.** Only `true` is true. Absent, `null`, `0` and `""` are all
+  false. There is no truthiness ladder.
+- **Comparison is JSON-typed.** Number-to-number is numeric, string-to-string is ordinal, anything
+  cross-type is false. No coercion ladder.
+- **Arithmetic is decimal, and numbers only.** These documents price orders, so binary floating point
+  is the wrong default — `0.1 + 0.2` is `0.3`. `+` does not concatenate strings; that is what
+  templates are for.
+- **Division by zero yields absent**, not an error.
+
+**Determinism.** `$run.now` is **forbidden in edge conditions and gate predicates**, and permitted in
+templates. `BuildAsync` runs once per attempt, and a resumed instance must retrace the routing its
+checkpoint recorded; a condition reading the clock could take a different branch, which is silent,
+intermittent and close to undebuggable. The validator refuses it by static inspection.
+
+**Templates.** A `{{ … }}` placeholder in a URL, header, body or prompt evaluates a full AbEx
+expression: `{{ $ctx.orderId }}`, `{{ $.total * 1.2 }}`. An absent placeholder renders empty. A bare
+string in `when`, `set` or `correlationKey` is AbEx directly — no field accepts both conventions.
+
+### Node kinds
+
+| `kind` | Maps to | Produces in `data` |
+| --- | --- | --- |
+| `transform` | `TransformExecutor` | The `set` map merged into `data` (or replacing it) |
+| `http` | `ApiCallExecutor` | `{ status, body }` |
+| `llm` | `LlmExecutor` | `{ text, value, model, inputTokens, outputTokens, costUsd, finishReason, elapsedMs }` |
+| `delay` | `DelayExecutor` | Unchanged — a delay is about *when*, not *what* |
+| `approval` | `HumanApprovalExecutor` | Unchanged; the node exists to be the place a human decides |
+| `publish` | `PublishDomainEventExecutor` | Unchanged; publishing is a side effect on the way past |
+| `wait-event` | `WaitForDomainEventExecutor` | The delivered payload |
+| `fan-in` | Barrier aggregation | `{ <into>: [ …each branch's data… ] }` |
+| `custom` | A registered `IDslNodeFactory` | Whatever the factory's executor produces |
+
+There is **no `delegate` kind**, and there never will be. Arbitrary code is precisely what a document
+must not carry.
+
+`http` and `llm` are the framework's own executors, hosted inside the DSL node — the egress
+allow-list, the `Idempotency-Key`, structured output, cost accounting and `llm.completed` all behave
+exactly as they do for a compiled workflow.
+
+### Custom nodes — the extension seam
+
+```csharp
+public sealed class RiskScoringNodeFactory : IDslNodeFactory
+{
+    public string Name => "score-risk";
+
+    public JsonNode? ParameterSchema => JsonNode.Parse("""
+        { "type": "object", "required": ["threshold"],
+          "properties": { "threshold": { "type": "number" } } }
+        """);
+
+    public IHostExecutor Create(DslNodeContext context)
+        => new RiskScorer(context.Node.Id, context.Parameters["threshold"]!.GetValue<decimal>());
+}
+```
+
+```json
+{ "id": "score", "kind": "custom", "node": "score-risk", "with": { "threshold": 0.82 } }
+```
+
+The executor must be a `HostExecutor<DslMessage, DslMessage>` and must use the id the document
+declared — gate policy and node state key off it. `ParameterSchema` is validated against `with` at
+**registration**, so a bad parameter fails startup rather than surprising a run.
+
+### Registration
+
+```csharp
+builder.Services.AddWorkflowHost(config)
+    .AddWorkflow<ExampleOrderWorkflow>()                       // compiled, unchanged
+    .UseDsl()                                                  // routes work before any document exists
+    .AddDslNode(new RiskScoringNodeFactory())
+    .AddDslWorkflow("workflows/order-settlement.json")
+    .AddDslWorkflowsFromDirectory("workflows/", "*.workflow.json");
+
+app.MapWorkflowApi();
+app.MapDslApi();
+```
+
+Order does not matter: documents are validated once the container is built, against the *complete*
+node catalog. A document that fails validation **fails startup**, with every diagnostic logged — the
+same place a bad compiled workflow fails.
+
+### Validation
+
+Two phases, because one cannot do the job.
+
+**JSON Schema** checks shape — required properties, `kind`-discriminated variants, id and SemVer
+patterns. Published at `docs/schema/abacus-workflow-dsl-1.0.json` and served from `GET /dsl/schema`,
+so an editor gives completion and inline errors before the document reaches a host.
+
+**The semantic validator** checks everything a schema cannot express, each with a stable code:
+
+| Codes | Cover |
+| --- | --- |
+| `DSL01xx` | DSL version, malformed JSON, schema violations, hash conflicts |
+| `DSL02xx` | Duplicate ids, unknown `start`/`output`/edge endpoints, duplicate edges |
+| `DSL03xx` | Unreachable nodes, dead ends, cycles with nothing that yields, unreachable barrier sources |
+| `DSL04xx` | Expression parsing, unknown functions, non-deterministic conditions, depth |
+| `DSL05xx` | Gates on non-gateable kinds, conditional gates with no predicate, escalation with no assignees |
+| `DSL06xx` | Unregistered custom nodes, bad `with` parameters, missing egress hosts |
+| `DSL07xx` | Document, node, edge and expression limits |
+
+Every diagnostic carries a JSON Pointer:
+
+```
+DSL0412  error  /nodes/3/gate/when   Unknown function 'lookupCustomer'.  Did you mean 'coalesce'?
+DSL0207  error  /edges/5/to          Edge targets 'setle', which is not a node.  Did you mean 'settle'?
+DSL0301  warn   /nodes/7             Node 'notify' is unreachable from 'price'.
+```
+
+A cycle is refused only when nothing on it yields — polling and wait-and-recheck are legitimate, but
+a cycle of pure compute nodes is a hot spin. Put a `delay`, `wait-event` or `approval` node on it.
+
+Environment-dependent checks report as **skipped** rather than passed when there is no host to check
+against, because a check that silently did not run is worse than one that openly did not.
+
+### Versions are immutable
+
+A document registers as `(name, version)` like any workflow, and the framework's rule applies:
+**a published version is immutable.** Identity is a canonical SHA-256 (RFC 8785) of the document —
+reformatting and property reordering do not change it, one byte of behaviour does. Registering a
+document whose `(name, version)` is known with a different hash is a startup failure naming both
+hashes. Editing a workflow means bumping the version.
+
+It also answers the operational question directly: *is this instance running the document I am
+looking at?* `GET /dsl/documents` reports each registered document's hash.
+
+### Routes
+
+| Route | Purpose |
+| --- | --- |
+| `GET /dsl/schema` | The published JSON Schema, for editor completion |
+| `GET /dsl/nodes` | Built-in kinds and every registered custom node, with parameter schemas |
+| `GET /dsl/functions` | The closed expression vocabulary, with arities |
+| `GET /dsl/documents` | Registered documents and their hashes |
+| `POST /dsl/validate` | Validate without registering — what an authoring tool calls |
+
+`POST /dsl/validate` reflects the host's registered node names back to the caller, so it takes the
+same authorization as the catalog routes.
+
+### Limits
+
+Document ≤ 1 MB, nodes ≤ 500, edges ≤ 2000, expression depth ≤ 32, regex match ≤ 200 ms. All
+configurable down through `ConfigureDsl`, none up.
+
+### What the DSL does not do
+
+Stated plainly, so you meet the boundary here rather than in an error message:
+
+- **No loops or iteration.** There is no `foreach`, and no way to sum an array. Fan-out over branches
+  is the intended shape. Unbounded iteration in a checkpointed engine has real semantics to work out
+  first.
+- **No sub-workflows.** The engine supports composing workflows; resolving and version-pinning one
+  document from another needs its own design.
+- **No runtime publication.** Documents load from disk at startup. A management API that accepts them
+  at run time changes the registry from immutable to mutable, which touches version resolution,
+  dispatch, authorization and tenancy.
+- **No export from C#.** A compiled definition cannot be emitted as a document. The DSL is a
+  different way in, not a serialization of the compiled path.
 
 ## Workflow audit records
 

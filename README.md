@@ -422,6 +422,65 @@ is bound. Both are verified against real servers in `tests/Abacus.Run.BrokerTest
 Full walkthrough: [Events, history, and SSE](docs/wiki.md#events-history-and-sse) and
 [Event broker](docs/wiki.md#event-broker-and-event-driven-workflows).
 
+## Authoring with the DSL
+
+A workflow can be a **JSON document** instead of C#: validated against a published schema,
+interpreted at build time, and registered exactly like a compiled definition. Same graph, same
+executors, same gates, same events — the DSL is a second front end onto the runtime, not a fork.
+
+The governing rule is that **the DSL composes but never computes**. A document declares which nodes
+exist, how they connect, and when an edge is taken; it carries no behaviour. Every unit of work is a
+capability the host already shipped, so the answer to "the DSL cannot express this" is always
+*register a node*, never *embed a script*.
+
+```json
+{
+  "dsl": "abacus.workflow/1.0",
+  "name": "order-settlement",
+  "version": "1.0.0",
+  "context": { "type": "object", "required": ["orderId", "amount"] },
+  "start": "price",
+  "output": ["settle"],
+  "nodes": [
+    { "id": "price", "kind": "transform", "set": { "total": "$ctx.amount * 1.2" } },
+    { "id": "settle", "kind": "http",
+      "method": "POST",
+      "url": "https://ledger.internal/v1/settlements",
+      "allowedHosts": ["ledger.internal"],
+      "body": "{\"order\":\"{{ $ctx.orderId }}\",\"amount\":{{ $.total }}}",
+      "gate": { "mode": "conditional", "when": "$.total > 25000", "reason": "RegulatedSettlement" } }
+  ],
+  "edges": [ { "from": "price", "to": "settle" } ]
+}
+```
+
+```csharp
+builder.Services.AddWorkflowHost(configuration)
+    .AddWorkflow<ExampleOrderWorkflow>()          // compiled, unchanged
+    .UseDsl()
+    .AddDslNode(new RiskScoringNodeFactory())     // extend the vocabulary
+    .AddDslWorkflowsFromDirectory("workflows/");  // compose it
+
+app.MapDslApi();
+```
+
+Node kinds cover `transform`, `http`, `llm`, `delay`, `approval`, `publish`, `wait-event`, `fan-in`
+and `custom`. Expressions are a closed, total language — absence is a value rather than an exception,
+conditions are strictly boolean, and arithmetic is decimal. Validation runs in two phases, and every
+diagnostic carries a JSON Pointer:
+
+```
+DSL0412  error  /nodes/3/gate/when   Unknown function 'lookupCustomer'.  Did you mean 'coalesce'?
+DSL0207  error  /edges/5/to          Edge targets 'setle', which is not a node.  Did you mean 'settle'?
+```
+
+An invalid document fails startup. A published `(name, version)` is immutable, enforced by a
+canonical hash of the document. Routes: `GET /dsl/schema`, `/dsl/nodes`, `/dsl/functions`,
+`/dsl/documents`, and `POST /dsl/validate`.
+
+Full walkthrough: [Authoring with the DSL](docs/wiki.md#authoring-with-the-dsl).
+Schema: [docs/schema/abacus-workflow-dsl-1.0.json](docs/schema/abacus-workflow-dsl-1.0.json).
+
 ## Audit records
 
 Events record what the runtime did. An audit record answers the separate question of why a run's
@@ -549,8 +608,10 @@ at startup.
 | `src/Abacus.Run` | Headless framework: workflow runtime, dispatch, executors, middleware, in-memory store defaults, and HTTP API endpoints |
 | `src/Abacus.Adapters.Cache.Redis` | Redis adapters: Streams event bus, workflow event broker, cross-replica control channel |
 | `src/Abacus.Adapters.Messaging.RabbitMQ` | RabbitMQ adapter: topic-exchange workflow event broker |
+| `src/Abacus.Run.Dsl` | Declarative authoring: JSON Schema validation, the AbEx expression language, and the document interpreter |
 | `src/Abacus.Run.Service` | Deployable host: control-plane UI, SQL Server stores, the SQLite audit-record store, startup wiring, and the example workflow |
 | `tests/Abacus.Run.UnitTests` | Unit coverage for runtime behavior; references the library only |
+| `tests/Abacus.Run.DslTests` | Expression, validation and interpreter coverage for the DSL |
 | `tests/Abacus.Run.IntegrationTests` | HTTP, control-plane, and architecture-boundary coverage against the real host |
 | `tests/Abacus.Run.ChaosTests` | Failure and lifecycle resilience coverage |
 | `tests/Abacus.Run.BrokerTests` | The distributed brokers against real Redis and RabbitMQ, via Testcontainers |
