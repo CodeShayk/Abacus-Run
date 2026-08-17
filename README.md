@@ -1,6 +1,6 @@
 # Abacus Run
 
-Abacus Run is a .NET workflow runtime and HTTP host for durable, observable workflow instances. It provides workflow version resolution, bounded concurrency, retries, checkpoints, approvals, event history, server-sent events, cancellation, reruns, and redacted audit/logging surfaces.
+Abacus Run is a .NET workflow runtime and HTTP host for durable, observable workflow instances. It provides workflow version resolution, bounded concurrency, retries, checkpoints, approvals, event history, server-sent events, a topic event broker for event-driven pipelines, cancellation, reruns, and redacted audit/logging surfaces.
 
 The runtime is built on Microsoft Agent Framework workflows. Stores are exposed through interfaces so the in-memory implementation can be replaced by durable persistence without changing workflow definitions.
 
@@ -163,7 +163,8 @@ public static WorkflowHostBuilder AddAbacus(this IServiceCollection services, IC
 
     if (configuration["Abacus:Redis:ConnectionString"] is { Length: > 0 } redis)
     {
-        services.AddRedisEventBus(redis, maxStreamLength: 10_000);
+        services.AddRedisEventBus(redis, maxStreamLength: 10_000);      // SSE fan-out across replicas
+        services.AddRedisEventBroker(redis, maxStreamLength: 100_000);  // cross-service pub/sub
     }
 
     return host;
@@ -197,8 +198,8 @@ app.Run();
 
 | Concern | Lives in |
 | --- | --- |
-| Runtime, dispatch, executors, middleware, HTTP API, in-memory defaults | `Abacus.Run` |
-| Razor Pages, SQL Server stores, Redis event bus, startup wiring | your service (`Abacus.Run.Service`) |
+| Runtime, dispatch, executors, middleware, HTTP API, in-memory defaults, in-process event broker | `Abacus.Run` |
+| Razor Pages, SQL Server stores, Redis event bus and broker, startup wiring | your service (`Abacus.Run.Service`) |
 
 The library carries no Razor, MVC, Entity Framework, or Redis dependency, and an architecture test in the integration suite fails the build if one drifts back in. Splitting a UI host out later is therefore a matter of moving Razor and infrastructure projects, not of untangling the runtime.
 
@@ -301,6 +302,86 @@ mismatched name returns `404`. `?section=plan,output` narrows the response to na
 - `GET /instances/{id}/approvals`
 - `POST /approvals/{approvalId}/decision`
 
+### Domain events
+
+- `POST /events`
+- `GET /subscriptions`
+
+Publish a message to a topic, and list what is listening or waiting. See [Events](#events).
+
+## Events
+
+Two kinds of events share the word and almost nothing else.
+
+A **notification** describes what a run is doing — keyed by instance, ordered by a gapless sequence,
+delivered to whoever is watching. It never affects execution; lose one and a dashboard is briefly out
+of date.
+
+A **domain event** describes what happened in the business — keyed by topic, routed to whoever
+declared interest, and it *causes* execution; lose one and work that should have happened never does.
+
+That asymmetry is why they are built differently: notifications are best-effort fan-out over a
+durable log, while broker delivery is a durable state transition. A domain event may cause a
+notification; a notification may never cause work.
+
+### Notifications from a node
+
+`Runtime.Notify` puts a workflow-defined event on the instance's stream, and is nullable in the same
+way `Runtime.Audit` is:
+
+```csharp
+if (Runtime.Notify is { } notify)
+{
+    await notify.NotifyAsync("documents.scanned", new { count = 3 }, cancellationToken);
+}
+// → event: custom.documents.scanned
+```
+
+The `custom.` prefix is applied by the runtime and cannot be opted out of, so a workflow can never
+shadow a framework event, and a consumer can filter the whole class on the prefix.
+
+A definition controls what its runs emit by implementing `INotifyingWorkflow` — `Minimal`,
+`Lifecycle` or `Standard`, overridable per node in both directions, plus the custom names it declares
+for the catalog API. Terminal events are never suppressible, and filtering happens before a sequence
+number is taken, so the gapless sequence that `Last-Event-ID` catch-up depends on stays intact.
+
+An `LlmExecutor` emits one `llm.completed` per call carrying model, prompt version, tokens, cost,
+latency and finish reason. Streamed tokens (`llm.delta`, opt-in per node via `StreamDeltas`) are
+**transient**: fanned out live, never stored, and written without an SSE `id:`, so a reconnecting
+client never waits for a chunk that no longer exists.
+
+### Event-driven workflows
+
+A workflow publishes to a topic, and another workflow either starts because of it or wakes up
+because of it:
+
+```csharp
+// Publish, as a side effect on the way past
+context.Node(new PublishEventExecutor<OrderPlaced>(
+    "publish", broker, topic: "orders.placed", correlationKey: o => o.OrderId));
+
+// Start on a message
+public IReadOnlyList<EventTrigger> Triggers => [new EventTrigger { TopicFilter = "orders.placed" }];
+
+// Or park mid-run until one arrives
+context.Node(new WaitForEventExecutor<PaymentContext, PaymentSettled>(
+    "await-settlement", subscriptions, "payment.settled", correlationKey: c => c.OrderId));
+```
+
+Delivery is a durable state transition, not a message: a trigger creates an instance row, a wait
+writes the payload to a subscription row and marks the instance dispatchable. Nothing waits in
+memory, so a pipeline survives a restart. A parked instance holds no execution slot and can wait for
+days.
+
+Topic filters use `*` for one segment and `#` for the remainder. Scope travels on the message —
+`Local` by default, so the same publishing code is correct in one service and in a fleet.
+`InProcessEventBroker` is registered by default; `AddRedisEventBroker` replaces it for cross-service
+pub/sub, and an impossible combination is rejected at composition time rather than failing silently
+in production.
+
+Full walkthrough: [Events, history, and SSE](docs/wiki.md#events-history-and-sse) and
+[Event broker](docs/wiki.md#event-broker-and-event-driven-workflows).
+
 ## Audit records
 
 Events record what the runtime did. An audit record answers the separate question of why a run's
@@ -399,7 +480,23 @@ Options are read from the `WorkflowHost` configuration section. For example:
 
 The default host uses in-memory instance, event, log, approval, checkpoint, blob, audit, and audit-record stores. Treat this configuration as development-oriented until durable store implementations are supplied.
 
-Set `Abacus:SqlServer:ConnectionString` to enable the EF Core SQL Server stores and `Abacus:Redis:ConnectionString` to enable Redis Streams and control messages. `AddAbacus` keeps the in-memory stores when these settings are absent.
+Set `Abacus:SqlServer:ConnectionString` to enable the EF Core SQL Server stores and `Abacus:Redis:ConnectionString` to enable Redis Streams, control messages, and the cross-service event broker. `AddAbacus` keeps the in-memory stores and the in-process broker when these settings are absent.
+
+`Abacus:Llm:Pricing` turns token counts into cost on `llm.completed` and into a drift signal:
+
+```json
+{
+  "Abacus": {
+    "Llm": {
+      "Pricing": {
+        "claude-sonnet-5": { "InputPerMillion": 3.00, "OutputPerMillion": 15.00 }
+      }
+    }
+  }
+}
+```
+
+A model with no entry reports `null` rather than zero, and unpriced samples are excluded from the cost baseline — "we do not know" and "it was free" are different facts, and conflating them would mask a later cost rise.
 
 `Abacus:AuditRecords:ConnectionString` points the SQLite audit-record store at its database file and
 defaults to `Data Source=./data/abacus-audit.db`. The directory is created and the migrations applied
@@ -410,7 +507,7 @@ at startup.
 | Project | Responsibility |
 | --- | --- |
 | `src/Abacus.Run` | Headless framework: workflow runtime, dispatch, executors, middleware, in-memory store defaults, and HTTP API endpoints |
-| `src/Abacus.Run.Service` | Deployable host: control-plane UI, SQL Server stores, Redis event bus, the SQLite audit-record store, startup wiring, and the example workflow |
+| `src/Abacus.Run.Service` | Deployable host: control-plane UI, SQL Server stores, Redis event bus and event broker, the SQLite audit-record store, startup wiring, and the example workflow |
 | `tests/Abacus.Run.UnitTests` | Unit coverage for runtime behavior; references the library only |
 | `tests/Abacus.Run.IntegrationTests` | HTTP, control-plane, and architecture-boundary coverage against the real host |
 | `tests/Abacus.Run.ChaosTests` | Failure and lifecycle resilience coverage |

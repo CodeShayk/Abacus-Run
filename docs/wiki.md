@@ -20,6 +20,7 @@ This page is the repository-level technical wiki. It documents the implementatio
 - [Human approval gates](#human-approval-gates)
 - [Tenant executor configuration](#tenant-executor-configuration)
 - [Events, history, and SSE](#events-history-and-sse)
+- [Event broker and event-driven workflows](#event-broker-and-event-driven-workflows)
 - [HTTP API](#http-api)
 - [Configuration](#configuration)
 - [Security and data handling](#security-and-data-handling)
@@ -41,7 +42,8 @@ This page is the repository-level technical wiki. It documents the implementatio
 | Persistence | In-memory stores by default |
 | Checkpoint cadence | Superstep by default; `None`, `SuperStep`, and `Manual` are supported |
 | Ownership | Dispatcher and lease abstractions are used by the host; the default stores are process-local |
-| Events | Sequenced per-instance event store plus optional event bus and SSE relay |
+| Events | Sequenced per-instance event store plus optional event bus and SSE relay; nodes emit their own via `Runtime.Notify`, and a definition sets its emission policy |
+| Event broker | Topic pub/sub for event-driven pipelines: workflows start on a trigger or park on a wait. Local in-process by default, Redis Streams for cross-service |
 | Approvals | Durable approval contracts and in-memory coordinator/store, with decision and expiry handling |
 | Middleware | Workflow-level and host-executor-level pipelines |
 | Audit records | A workflow declares the shape of its own audit record; the runtime hands every node a recorder and stores entries generically |
@@ -64,6 +66,8 @@ The repository contains a working runtime, API host, control plane, built-in exe
 - `InMemoryBlobStore`
 - `OverflowCheckpointStore` over the blob abstraction
 - `InMemoryEventBus`
+- `InMemoryEventSubscriptionStore`
+- `InProcessEventBroker`
 
 The store interfaces are the substitution boundary for durable infrastructure. A production deployment must provide shared, durable implementations before relying on process loss recovery or multiple replicas.
 
@@ -450,7 +454,7 @@ builder.Services
     .AddWorkflow(new GreetingWorkflow());
 ```
 
-`AddAbacus(...)` registers the workflow host, built-in middleware, background services, control-plane UI, and the default in-memory stores. Set `Abacus:SqlServer:ConnectionString` to replace the in-memory stores with EF Core SQL Server implementations, and set `Abacus:Redis:ConnectionString` to enable Redis Streams and cross-replica control messages.
+`AddAbacus(...)` registers the workflow host, built-in middleware, background services, control-plane UI, and the default in-memory stores. Set `Abacus:SqlServer:ConnectionString` to replace the in-memory stores with EF Core SQL Server implementations, and set `Abacus:Redis:ConnectionString` to enable Redis Streams, cross-replica control messages, and the cross-service event broker.
 
 ### Middleware ordering
 
@@ -669,7 +673,15 @@ Configuration writes are recorded in the audit store as `gate.policy.set` and `g
 
 ## Events, history, and SSE
 
-Every instance event has a monotonically increasing per-instance `Sequence`. The same sequence is used as the SSE event ID, which lets clients reconnect with `Last-Event-ID` and request replay from the same cursor.
+The system carries two kinds of events that share a word and almost nothing else.
+
+A **notification** describes what a run is doing. It is keyed by instance, ordered by a gapless sequence, and delivered to whoever happens to be watching. It never affects execution — lose one and a dashboard is briefly out of date. That is this section.
+
+A **domain event** describes what happened in the business. It is keyed by topic, routed to whoever declared interest, and it *causes* execution — lose one and work that should have happened never does. That is [Event broker and event-driven workflows](#event-broker-and-event-driven-workflows).
+
+The asymmetry in cost is why the two are built differently: notifications are best-effort fan-out over a durable log, while broker delivery is a durable state transition. A domain event may cause a notification; a notification may never cause work.
+
+Every durable instance event has a monotonically increasing per-instance `Sequence`. The same sequence is used as the SSE event ID, which lets clients reconnect with `Last-Event-ID` and request replay from the same cursor.
 
 Important event types include:
 
@@ -682,6 +694,10 @@ Important event types include:
 - `approval.decided`
 - `approval.expired`
 - `request.pending`
+- `llm.completed`
+- `llm.delta` (transient — see below)
+- `custom.<name>` (workflow-defined — see below)
+- `event.triggered`, `event.delivered`, `event.wait_expired`
 - `workflow.output`
 - `workflow.terminated`
 - `instance.cancelled`
@@ -691,6 +707,162 @@ Important event types include:
 - `heartbeat`
 
 Use event history for polling, audit views, and recovery. Use SSE for live progress. Approval events use the same event stream as workflow progress; consumers do not need a separate subscription to observe a gate trip.
+
+### Emitting your own notifications
+
+A node reports something the framework cannot describe on its behalf through `Runtime.Notify`, which is nullable in the same way `Runtime.Audit` is — an executor exercised outside a host gets null and costs nothing:
+
+```csharp
+if (Runtime.Notify is { } notify)
+{
+    await notify.NotifyAsync("documents.scanned", new { count = 3 }, cancellationToken);
+}
+// → event: custom.documents.scanned
+```
+
+The `custom.` prefix is applied by the runtime and cannot be opted out of, so a workflow can never shadow a framework event however it names its own, and a consumer can filter the whole class on the prefix without knowing any workflow's vocabulary. A name that is empty, contains whitespace, or has an empty segment throws at the call site — a malformed event type is indistinguishable from an event that was never sent.
+
+Payloads pass through the same redaction as every other event.
+
+### Controlling what a run emits
+
+A workflow that emits `executor.invoked` and `executor.completed` for every node of a wide fan-out can be the dominant write volume in a deployment. A definition states its own policy by implementing `INotifyingWorkflow`; one that says nothing keeps today's behaviour and pays nothing for the feature.
+
+```csharp
+public sealed class BulkWorkflow : IWorkflowDefinition<Ctx, Result>, INotifyingWorkflow
+{
+    public NotificationPolicy Notifications { get; } = new()
+    {
+        Level = NotificationLevel.Lifecycle,        // supersteps, but no per-node chatter
+        ByNode = new Dictionary<string, NotificationLevel>(StringComparer.Ordinal)
+        {
+            ["reconcile"] = NotificationLevel.Standard   // except this one, which stays loud
+        },
+        Emits = ["documents.scanned"]               // advertised by the catalog API
+    };
+}
+```
+
+| Level | Emits |
+| --- | --- |
+| `Minimal` | Start, output and terminal only |
+| `Lifecycle` | Adds superstep boundaries |
+| `Standard` | Adds `executor.*`, `llm.*` and `custom.*`. The default |
+
+`ByNode` works in both directions: it can quiet one node in a `Standard` workflow or keep one node loud in a `Minimal` one.
+
+Two rules keep the policy safe. **Terminal events are never suppressible** — a subscriber's stream closes on `workflow.terminated`, and `approval.*`, `instance.*` and `event.*` are control-plane and broker facts rather than run chatter. And **filtering happens before the sequence number is taken**: a suppressed event that had consumed one would leave a hole in the gapless sequence, and `Last-Event-ID` catch-up would wait forever for an event that is never coming.
+
+Declared `Emits` names are validated at startup and surfaced on `GET /workflows/{name}`, so a consumer discovers the vocabulary rather than reverse-engineering it.
+
+### Transient events
+
+`llm.delta` is fanned out to live subscribers and **never appended to the durable store**. A token already rendered has no replay value, and the complete text is in the executor's output either way.
+
+A transient event takes no sequence number and is written to SSE without an `id:` field. That keeps the durable sequence gapless, and it leaves a reconnecting client's `Last-Event-ID` pinned to the last durable event — so a reconnect delivers the stored history plus whatever is streaming now, and never waits for a chunk that no longer exists. A token stream is not resumable, and the transport says so.
+
+Streaming is opt-in per node via `LlmOptions.StreamDeltas`, which defaults to `false`.
+
+### LLM telemetry
+
+An `LlmExecutor` emits one `llm.completed` per invocation — a model call is one fact, not a stream of them:
+
+```
+event: llm.completed
+data: {"executorId":"classify","model":"claude-sonnet-5","promptVersion":"v3",
+       "inputTokens":1840,"outputTokens":212,"costUsd":0.0084,
+       "elapsedMs":1240,"finishReason":"Stop","attempt":1,"streamed":false}
+```
+
+Turn it off for a node with `LlmOptions.EmitCompletion = false`. The prompt and the response text are deliberately absent: they already travel the executor's input/output path where redaction applies, and repeating them here would put model output on a stream a UI reads.
+
+The same numbers go to `ILogStore` as a per-instance usage entry and to OpenTelemetry as metrics, where `LlmDriftMiddleware` compares them against a rolling baseline. Cost is one of the drift signals, and it catches what token counts alone miss — a provider routing to a pricier model, or a prompt that has quietly grown.
+
+Cost needs a price table (see [Configuration](#configuration)). An unpriced model reports `null`, never zero, and unpriced samples are excluded from the cost baseline rather than counted: a zero would average in as a real observation and make a genuine rise afterwards look smaller than it is.
+
+## Event broker and event-driven workflows
+
+The broker is the other channel: a workflow publishes a message to a topic, and another workflow either **starts** because of it or **wakes up** because of it. The publisher does not know who is listening, and the listener does not know who published.
+
+**Delivery is a durable state transition, not a message.** A trigger match creates an instance row; a wait match writes the payload to a subscription row and marks the instance `Dispatchable`, which the ordinary dispatcher then claims exactly as it claims work released by an approval. Nothing is held in memory waiting to be acted on, so an event-driven pipeline survives a restart. The transport only makes that transition fast; it is never what makes it happen.
+
+### Publishing
+
+```csharp
+ExecutorBinding publish = context.Node(new PublishEventExecutor<OrderPlaced>(
+    "publish-order-placed",
+    context.Services!.GetRequiredService<IEventBroker>(),
+    topic: "orders.placed",
+    correlationKey: o => o.OrderId));
+```
+
+The node passes its input through unchanged, so it drops into an existing edge without rewiring the graph around it. Messages carry the publishing instance's tenant and id for provenance.
+
+### Subscribing
+
+A workflow subscribes in one of two ways.
+
+**Trigger** — a matching message starts a new instance, with the payload as its context:
+
+```csharp
+public sealed class ShipOrderWorkflow : IWorkflowDefinition<OrderPlaced, ShipmentResult>, IEventTriggeredWorkflow
+{
+    public IReadOnlyList<EventTrigger> Triggers =>
+        [new EventTrigger { TopicFilter = "orders.placed" }];
+}
+```
+
+**Wait** — the instance parks mid-run until a matching message arrives, then resumes with the payload:
+
+```csharp
+ExecutorBinding wait = context.Node(new WaitForEventExecutor<PaymentContext, PaymentSettled>(
+    "await-settlement",
+    context.Services!.GetRequiredService<IEventSubscriptionStore>(),
+    topicFilter: "payment.settled",
+    correlationKey: c => c.OrderId,
+    timeout: TimeSpan.FromDays(3),
+    onExpiry: WaitExpiryAction.DeadStop));
+```
+
+A wait costs nothing while it waits. The executor registers a durable subscription and halts, and the instance checkpoints and releases its lease — the same park mechanism an approval gate uses. A workflow can wait days on a settlement without holding an execution slot.
+
+### Topics
+
+Topics are dot-delimited. Subscriber filters may use `*` for exactly one segment and `#` for the trailing remainder; published topics may not use either.
+
+| Filter | Matches | Does not match |
+| --- | --- | --- |
+| `orders.placed` | `orders.placed` | `orders.shipped` |
+| `orders.*` | `orders.placed` | `orders`, `orders.eu.placed` |
+| `orders.#` | `orders`, `orders.eu.west.placed` | `payments.placed` |
+
+Wildcards must be whole segments — `order*` is rejected rather than quietly treated as a literal, because a filter that matches nothing looks identical to an upstream that published nothing. Matching is ordinal and case-sensitive.
+
+### Local by default, global by declaration
+
+Scope travels on the message, not on the call site and not on whichever transport happens to be registered.
+
+| Scope | Reach |
+| --- | --- |
+| `Local` *(default)* | Stays inside the publishing service; a private implementation detail of it |
+| `Distributed` | Crosses the service boundary, for pub/sub between separately deployed services |
+
+The same publishing code is therefore correct in a single service and in a fleet, and registering a distributed transport widens what a publisher *may* do without changing what any existing publisher does.
+
+| Transport | Reach | Competing consumers | Replay | Dead letter |
+| --- | --- | --- | --- | --- |
+| `InProcessEventBroker` *(default)* | This service | Yes | No | No |
+| `RedisEventBroker` *(`AddRedisEventBroker`)* | Every service | Yes | Yes | Yes |
+
+`RedisEventBroker` is the in-process broker *plus a wire*, not a second implementation. Local messages never touch Redis. Distributed ones go to a Redis Stream and come back to every service through its own consumer, including the publisher's own — publishing does not also deliver locally, because that would deliver twice. Consumer groups carry the distinction between routing work and observing it: a named `ConsumerGroup` means exactly one member of the fleet handles each message, an unnamed one gets a private group and sees its own copy.
+
+Publishing `Distributed` against an in-process broker fails invisibly — the message still reaches every local subscriber and simply never leaves the host. So a broker publishes a `BrokerCapabilities` record and an impossible combination is rejected at composition time: a mismatched executor throws in its constructor, and `POST /events` returns `400` rather than `202`.
+
+### Operating it
+
+Broker activity is reported onto the instance's own event stream as `event.triggered`, `event.delivered` and `event.wait_expired`, so an operator watching a run sees the domain activity that moved it inline with everything else. The instance detail page shows a **Waiting on** panel naming the topic, the blocked node, the correlation key and the expiry — `AwaitingInput` with no stated cause is the worst version of this feature.
+
+`GET /subscriptions` lists what is listening and what is waiting.
 
 ## HTTP API
 
@@ -809,6 +981,23 @@ Control operations are instance-state dependent. The API returns conflict respon
 | `GET` | `/instances/{id}/approvals` | List approvals for an instance |
 | `POST` | `/approvals/{approvalId}/decision` | Submit an approval decision |
 
+### Domain events
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/events` | Publish a domain message to a topic |
+| `GET` | `/subscriptions` | List triggers and waits |
+
+`POST /events` takes `{ "topic", "payload", "correlationKey", "scope" }`. `scope` defaults to `Local`; `Distributed` is refused with `400` when no distributed broker is registered, because accepting it would mean the other service silently never hears about it. An `Idempotency-Key` header becomes the message id, so a retried publish is the same message rather than a second one.
+
+```bash
+curl -X POST http://localhost:5000/events \
+  -H 'Content-Type: application/json' -H 'X-Tenant-Id: acme' \
+  -d '{"topic":"payment.settled","payload":{"orderId":"ORD-1","amount":250.50},"correlationKey":"ORD-1"}'
+```
+
+`GET /subscriptions` filters on `instanceId`, `topic`, `kind` (`Trigger` or `Wait`), `pendingOnly` and `limit`. Delivered payloads are deliberately absent from the response: they are domain data already redacted on the way to the event stream, and repeating them here would undo that.
+
 ## Configuration
 
 Configuration is bound from the `WorkflowHost` section. Defaults are defined in `WorkflowHostOptions`.
@@ -889,10 +1078,22 @@ select the concrete infrastructure it substitutes for the in-memory defaults:
   "Abacus": {
     "AuditRecords": { "ConnectionString": "Data Source=./data/abacus-audit.db" },
     "SqlServer": { "ConnectionString": "", "EnsureDatabaseCreated": false },
-    "Redis": { "ConnectionString": "", "MaxStreamLength": 10000 }
+    "Redis": { "ConnectionString": "", "MaxStreamLength": 10000, "MaxBrokerStreamLength": 100000 },
+    "Llm": {
+      "Pricing": {
+        "claude-sonnet-5": { "InputPerMillion": 3.00, "OutputPerMillion": 15.00 }
+      }
+    }
   }
 }
 ```
+
+`Abacus:Redis:MaxBrokerStreamLength` is larger than `MaxStreamLength` because one broker stream
+carries every topic for the whole deployment, while the event streams are per instance.
+
+`Abacus:Llm:Pricing` is what turns token counts into cost on `llm.completed` and into a drift signal.
+A model with no entry reports `null` rather than zero — "we do not know" and "it was free" are
+different facts, and conflating them would drag the cost baseline down and mask a later rise.
 
 `Abacus:AuditRecords:ConnectionString` backs the generic audit-record store with SQLite and defaults
 to `Data Source=./data/abacus-audit.db`; the directory is created at startup and the migrations are
@@ -1133,6 +1334,24 @@ Provide an `IGatePolicyStore` implementation when approval requirements depend o
 
 The runner publishes through `IEventSink`. A sink may persist the event, relay it to an event bus, or do both. Preserve the per-instance sequence when forwarding to SSE or external consumers.
 
+An envelope marked `Transient` must be relayed but **not** persisted, and carries no sequence number. A sink that stores it anyway reintroduces the write amplification transience exists to avoid; one that assigns it a sequence puts a hole in the durable sequence and breaks `Last-Event-ID` catch-up.
+
+### Custom event brokers
+
+Implement `IEventBroker` to carry domain messages over a transport of your choosing — Azure Service Bus, Kafka, NATS. Register it in place of the default `InProcessEventBroker`; `AddRedisEventBroker` is the worked example.
+
+Three obligations:
+
+- **Honour `DeliveryScope`.** A `Local` message must never leave the process. A broker that widens local traffic onto the wire leaks what a service declared private.
+- **Report `BrokerCapabilities` truthfully.** It is what lets composition reject an impossible subscription at startup instead of delivering locally and looking like it worked. Overstating a capability turns a startup error into a silent production gap.
+- **Distinguish consumer groups.** A named `ConsumerGroup` means exactly one member of the fleet handles each message; an unnamed one means every subscriber gets its own copy. Collapsing the two turns work routing into duplicated work, or an observer into a thief.
+
+Delivery may be at-least-once. Exactly-once resumption is the subscription store's job, not the transport's: `IEventSubscriptionStore.TryDeliverAsync` is a compare-and-set, so a redelivered message costs a lookup rather than resuming an instance twice.
+
+### Custom subscription storage
+
+Implement `IEventSubscriptionStore` so triggers and waits outlive the process. `TryDeliverAsync` must be a conditional update — a relational implementation writes `UPDATE ... WHERE DeliveredMessageId IS NULL` and reports whether it won. `ClaimExpiredAsync` must mark what it returns under the same lock or transaction that selected it, or two sweepers will expire the same instance twice. Reuse `SubscriptionMatch.Matches` as the final predicate after any database-side pre-filtering, so a custom store cannot disagree with the in-memory one about what a subscription means.
+
 ## Design constraints
 
 ### At-least-once execution
@@ -1185,6 +1404,38 @@ Check that `AddBackgroundServices()` is registered and that the dispatcher is ru
 ### An approval does not resume the instance
 
 Inspect the approval state, decision authorization, quorum, expiry, and instance status. A successful decision wakes the instance by moving it to a claimable state; the dispatcher must be running to execute the resumed run.
+
+### A published event starts or resumes nothing
+
+Check `GET /subscriptions` first — an empty result means nothing was ever listening, which is a different problem from a delivery failure.
+
+The usual cause is that the filter and the topic do not match: matching is ordinal and case-sensitive, `*` covers exactly one segment, and `#` only matches as the final segment. `orders.*` does not match `orders.eu.placed`. A wildcard glued to literal text (`order*`) is rejected at registration rather than treated as a prefix, so check startup logs for a rejected trigger.
+
+Tenant and correlation narrow further: a subscription that names a tenant sees only that tenant, and one that names a correlation key sees only messages carrying the identical value. A message published with no tenant does not match a subscription scoped to one.
+
+`BrokerDispatchService` counts messages that matched nothing and logs them at debug. If the count is rising, the message is arriving and the filters are wrong; if it is not, the message is not arriving.
+
+Finally, a `Distributed` message needs a distributed broker. Against the in-process default the publish is refused outright, so check for a `NotSupportedException` at the publisher or a `400` from `POST /events` rather than looking for a lost message.
+
+### An instance is stuck in `AwaitingInput`
+
+If the workflow uses `WaitForEventExecutor`, this is the normal parked state, not a fault. The instance detail page shows a **Waiting on** panel naming the topic, the blocked node and the correlation key; `GET /subscriptions?instanceId={id}&pendingOnly=true` is the same information over the API.
+
+A wait with no `timeout` waits forever by design. Set one, with `WaitExpiryAction.DeadStop` to fail the instance or `Resume` to let the workflow take its own timeout branch, and make sure `EventWaitSweeperService` is running — it comes with `AddBackgroundServices()`.
+
+### `llm.delta` events are missing from event history
+
+They are not stored, by design. Streamed tokens are transient: live fan-out only, no sequence number, no durable row. Subscribe to `GET /instances/{id}/events` to see them; `GET /instances/{id}/events/history` will never return them.
+
+Also confirm `LlmOptions.StreamDeltas` is set on that node — it defaults to `false`, so no deltas are produced at all unless the definition asked for them.
+
+### `llm.completed` reports `costUsd: null`
+
+The model has no entry under `Abacus:Llm:Pricing`. Cost is reported as absent rather than zero on purpose, and unpriced samples are excluded from the cost drift baseline, so an unpriced period cannot make a later rise look smaller than it is. Add the model's per-million rates to start pricing it.
+
+### Expected events are missing from the stream
+
+Check whether the definition implements `INotifyingWorkflow`. A `Minimal` or `Lifecycle` level suppresses `executor.*` and `custom.*`, and `ByNode` can quiet one node while the rest of the workflow stays loud. Suppressed events consume no sequence number, so a gap in the numbering is not the symptom — the events are simply absent.
 
 ### An executor pauses for approval although the definition left it autonomous
 
