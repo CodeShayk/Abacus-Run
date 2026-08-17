@@ -54,7 +54,8 @@ This page is the repository-level technical wiki. It documents the implementatio
 | Middleware | Workflow-level and host-executor-level pipelines |
 | Audit records | A workflow declares the shape of its own audit record; the runtime hands every node a recorder and stores entries generically |
 | Library | `src/Abacus.Run` — headless framework: runtime, dispatch, executors, middleware, in-memory stores, HTTP API |
-| Service host | `src/Abacus.Run.Service` — control-plane UI, SQL Server stores, Redis event bus, startup wiring |
+| Transport adapters | `src/Abacus.Adapters.Cache.Redis` and `src/Abacus.Adapters.Messaging.RabbitMQ` — each implements the framework's transport contracts and depends on nothing but the framework and its own client |
+| Service host | `src/Abacus.Run.Service` — control-plane UI, SQL Server stores, startup wiring that selects the adapters |
 | Container | Multi-stage .NET 9 image listening on port 8080 |
 | Image publishing | GitHub Actions publishes `ghcr.io/codeshayk/abacus-run` |
 
@@ -71,9 +72,9 @@ The repository contains a working runtime, API host, control plane, built-in exe
 - `InMemoryAuditRecordStore`
 - `InMemoryBlobStore`
 - `OverflowCheckpointStore` over the blob abstraction
-- `InMemoryEventBus`
-- `InMemoryEventSubscriptionStore`
-- `InProcessEventBroker`
+- `InMemoryNotificationBus`
+- `InMemoryDomainEventSubscriptionStore`
+- `InProcessDomainEventBroker`
 
 The store interfaces are the substitution boundary for durable infrastructure. A production deployment must provide shared, durable implementations before relying on process loss recovery or multiple replicas.
 
@@ -163,7 +164,7 @@ Folders inside each project:
 ```
 src/Abacus.Run/               src/Abacus.Run.Service/
   Abstractions/                 ControlPlane/      Razor Pages backing services
-  Api/                          Infrastructure/    SQL Server stores, Redis bus
+  Api/                          Infrastructure/    SQL Server stores
   Core/                           Auditing/        audit-record store and migrations
   Dispatch/                     Pages/             control-plane Razor Pages
   EventBus/                     Workflows/         workflow definitions hosted here
@@ -171,14 +172,30 @@ src/Abacus.Run/               src/Abacus.Run.Service/
   Middlewares/                  wwwroot/           control-plane CSS and JS
   Persistence/                  Program.cs
                                 AbacusServiceCollectionExtensions.cs
+
+src/Abacus.Adapters.Cache.Redis/      src/Abacus.Adapters.Messaging.RabbitMQ/
+  RedisCacheAdapter.cs                  RabbitMqMessagingAdapter.cs
+  RedisNotificationBus.cs               RabbitMqDomainEventBroker.cs
+  RedisServiceCollectionExtensions.cs   RabbitMqServiceCollectionExtensions.cs
 ```
 
 ### Where the line falls
 
-The library is headless. It serves the API and nothing else, so it takes no dependency on Razor,
-MVC, Entity Framework, or Redis, and a consumer that references it gets a working host without
-inheriting a UI or a storage choice. The service supplies what is specific to one deployment: the
-operator UI, the concrete stores and bus, and the startup code that selects them.
+Three kinds of project, and the rule for each is different.
+
+The **library** is headless. It serves the API and nothing else, so it takes no dependency on Razor,
+MVC, Entity Framework, or any transport client, and a consumer that references it gets a working host
+without inheriting a UI or a storage choice.
+
+An **adapter** implements the framework's contracts over one technology. It references
+`Abacus.Run` and its own client library, and nothing else of ours. In particular it does not
+reference a host — a transport that did would be tied to one deployment and reusable only by copying
+it — and the adapters do not reference each other, so choosing Redis never drags in an AMQP client.
+
+The **service** supplies what is specific to one deployment: the operator UI, the concrete stores,
+and the startup code that selects an adapter. It references both adapters so an operator can switch
+transport by configuration rather than by rebuild; neither connects unless its connection string is
+set.
 
 `AddAbacus` reads as two steps for this reason — register the framework with its in-memory defaults,
 then displace those defaults when a connection string is configured. With neither
@@ -297,7 +314,7 @@ so a workflow pays for nothing it does not ask for.
 | --- | --- | --- |
 | `IWorkflowDefinition<TContext, TResult>` | Name, version, context/result types, the graph | this section |
 | `IAuditedWorkflowDefinition` | The shape of the workflow's own audit record | [Audit records](#workflow-audit-records) |
-| `IEventTriggeredWorkflow` | Topics that start an instance of this workflow | [Event broker](#event-broker-and-event-driven-workflows) |
+| `IDomainEventTriggeredWorkflow` | Topics that start an instance of this workflow | [Event broker](#event-broker-and-event-driven-workflows) |
 | `INotifyingWorkflow` | Emission level, per-node overrides, SSE on/off, custom event names | [Events](#events-history-and-sse) |
 
 Approval gates are not an interface — they are declared per node, inline in `BuildAsync`.
@@ -364,17 +381,17 @@ are wanted — a raw node gets none of them.
 | `DelayExecutor` | `(id, TimeSpan, ITimerService)` | Durable delay — checkpoints and halts rather than blocking |
 | `HumanApprovalExecutor<T>` | `(id)` | Approval as an explicit node rather than node configuration |
 | `FanInExecutor<TItem, TOut>` | `(id, aggregate)` | Aggregates a fan-in barrier's inputs |
-| `PublishEventExecutor<T>` | `(id, broker, topic, …)` | Publishes a domain message, passing input through |
-| `WaitForEventExecutor<TIn, TPayload>` | `(id, subscriptions, topicFilter, …)` | Parks until a matching message arrives |
+| `PublishDomainEventExecutor<T>` | `(id, broker, topic, …)` | Publishes a domain message, passing input through |
+| `WaitForDomainEventExecutor<TIn, TPayload>` | `(id, subscriptions, topicFilter, …)` | Parks until a matching message arrives |
 
 Three of them behave in ways worth knowing before you reach for them:
 
 - **`DelayExecutor` does not sleep.** It writes a timer row, checkpoints and halts, so the instance
   releases its lease. A 24-hour delay costs no execution capacity, and survives a restart. It needs
   an `ITimerService` from `context.Services`.
-- **`PublishEventExecutor<T>` passes its input through unchanged.** Publishing is a side effect on
+- **`PublishDomainEventExecutor<T>` passes its input through unchanged.** Publishing is a side effect on
   the way past, so the node drops into an existing edge without rewiring the graph around it.
-- **`WaitForEventExecutor` runs twice.** The first pass registers a durable subscription and parks;
+- **`WaitForDomainEventExecutor` runs twice.** The first pass registers a durable subscription and parks;
   after delivery the runner resumes from the checkpoint, the executor runs again, finds its payload
   and returns it. Anything it does before parking therefore happens twice — keep it to registering
   the wait.
@@ -474,13 +491,13 @@ Publishing and waiting are ordinary nodes; notifying is a call inside one. Resol
 subscription store from `context.Services`:
 
 ```csharp
-var broker = context.Services!.GetRequiredService<IEventBroker>();
-var subscriptions = context.Services!.GetRequiredService<IEventSubscriptionStore>();
+var broker = context.Services!.GetRequiredService<IDomainEventBroker>();
+var subscriptions = context.Services!.GetRequiredService<IDomainEventSubscriptionStore>();
 
-ExecutorBinding publish = context.Node(new PublishEventExecutor<OrderPlaced>(
+ExecutorBinding publish = context.Node(new PublishDomainEventExecutor<OrderPlaced>(
     "publish-order-placed", broker, topic: "orders.placed", correlationKey: o => o.OrderId));
 
-ExecutorBinding wait = context.Node(new WaitForEventExecutor<Order, PaymentSettled>(
+ExecutorBinding wait = context.Node(new WaitForDomainEventExecutor<Order, PaymentSettled>(
     "await-settlement", subscriptions, "payment.settled",
     correlationKey: o => o.OrderId, timeout: TimeSpan.FromDays(3)));
 ```
@@ -580,15 +597,15 @@ request/response logging, and LLM drift. See
 public sealed class OrderWorkflow
     : IWorkflowDefinition<OrderContext, OrderResult>,
       IAuditedWorkflowDefinition,
-      IEventTriggeredWorkflow,
+      IDomainEventTriggeredWorkflow,
       INotifyingWorkflow
 {
     public string Name => "order";
     public string Version => "1.2.0";
 
     // Started by a domain message as well as by POST /workflows/order/instances.
-    public IReadOnlyList<EventTrigger> Triggers =>
-        [new EventTrigger { TopicFilter = "orders.placed" }];
+    public IReadOnlyList<DomainEventTrigger> Triggers =>
+        [new DomainEventTrigger { TopicFilter = "orders.placed" }];
 
     // Quiet by default; the interesting node stays loud. Streaming stays on.
     public NotificationPolicy Notifications { get; } = new()
@@ -611,7 +628,7 @@ public sealed class OrderWorkflow
 
     public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken ct)
     {
-        var subscriptions = context.Services!.GetRequiredService<IEventSubscriptionStore>();
+        var subscriptions = context.Services!.GetRequiredService<IDomainEventSubscriptionStore>();
 
         ExecutorBinding validate = context.Node(new Validate("validate"));
 
@@ -623,7 +640,7 @@ public sealed class OrderWorkflow
             .Locked());
 
         ExecutorBinding awaitPayment = context.Node(
-            new WaitForEventExecutor<OrderContext, PaymentSettled>(
+            new WaitForDomainEventExecutor<OrderContext, PaymentSettled>(
                 "await-settlement", subscriptions, "payment.settled",
                 correlationKey: o => o.OrderId, timeout: TimeSpan.FromDays(3)));
 
@@ -1178,9 +1195,9 @@ The broker is the other channel: a workflow publishes a message to a topic, and 
 ### Publishing
 
 ```csharp
-ExecutorBinding publish = context.Node(new PublishEventExecutor<OrderPlaced>(
+ExecutorBinding publish = context.Node(new PublishDomainEventExecutor<OrderPlaced>(
     "publish-order-placed",
-    context.Services!.GetRequiredService<IEventBroker>(),
+    context.Services!.GetRequiredService<IDomainEventBroker>(),
     topic: "orders.placed",
     correlationKey: o => o.OrderId));
 ```
@@ -1194,19 +1211,19 @@ A workflow subscribes in one of two ways.
 **Trigger** — a matching message starts a new instance, with the payload as its context:
 
 ```csharp
-public sealed class ShipOrderWorkflow : IWorkflowDefinition<OrderPlaced, ShipmentResult>, IEventTriggeredWorkflow
+public sealed class ShipOrderWorkflow : IWorkflowDefinition<OrderPlaced, ShipmentResult>, IDomainEventTriggeredWorkflow
 {
-    public IReadOnlyList<EventTrigger> Triggers =>
-        [new EventTrigger { TopicFilter = "orders.placed" }];
+    public IReadOnlyList<DomainEventTrigger> Triggers =>
+        [new DomainEventTrigger { TopicFilter = "orders.placed" }];
 }
 ```
 
 **Wait** — the instance parks mid-run until a matching message arrives, then resumes with the payload:
 
 ```csharp
-ExecutorBinding wait = context.Node(new WaitForEventExecutor<PaymentContext, PaymentSettled>(
+ExecutorBinding wait = context.Node(new WaitForDomainEventExecutor<PaymentContext, PaymentSettled>(
     "await-settlement",
-    context.Services!.GetRequiredService<IEventSubscriptionStore>(),
+    context.Services!.GetRequiredService<IDomainEventSubscriptionStore>(),
     topicFilter: "payment.settled",
     correlationKey: c => c.OrderId,
     timeout: TimeSpan.FromDays(3),
@@ -1240,9 +1257,8 @@ The same publishing code is therefore correct in a single service and in a fleet
 
 | Transport | Reach | Competing consumers | Replay | Dead letter |
 | --- | --- | --- | --- | --- |
-| `InProcessEventBroker` *(default)* | This service | Yes | No | No |
-| `RedisEventBroker` *(`AddRedisEventBroker`)* | Every service | Yes | Yes | Yes |
-| `RabbitMqEventBroker` *(`AddRabbitMqEventBroker`)* | Every service | Yes | No | Yes |
+| `InProcessDomainEventBroker` *(default)* | This service | Yes | No | No |
+| `RabbitMqMessagingAdapter` *(`AddRabbitMqMessaging`)* | Every service | Yes | No | Yes |
 
 Each distributed broker is the in-process broker *plus a wire*, not a second implementation. Local messages never leave the process. Distributed ones go onto the transport and come back to every service through its own consumer, including the publisher's own — publishing does not also deliver locally, because that would deliver twice. Consumer groups carry the distinction between routing work and observing it: a named `ConsumerGroup` means exactly one member of the fleet handles each message, an unnamed one gets a private group and sees its own copy.
 
@@ -1255,7 +1271,7 @@ The topic vocabularies happen to agree: AMQP's `*` is one word and `#` is the re
 
 Register one or the other, not both — the second registration replaces the first.
 
-Publishing `Distributed` against an in-process broker fails invisibly — the message still reaches every local subscriber and simply never leaves the host. So a broker publishes a `BrokerCapabilities` record and an impossible combination is rejected at composition time: a mismatched executor throws in its constructor, and `POST /events` returns `400` rather than `202`.
+Publishing `Distributed` against an in-process broker fails invisibly — the message still reaches every local subscriber and simply never leaves the host. So a broker publishes a `DomainEventBrokerCapabilities` record and an impossible combination is rejected at composition time: a mismatched executor throws in its constructor, and `POST /events` returns `400` rather than `202`.
 
 ### Operating it
 
@@ -1781,25 +1797,25 @@ Provide an `IGatePolicyStore` implementation when approval requirements depend o
 
 ### Custom event sinks and buses
 
-The runner publishes through `IEventSink`. A sink may persist the event, relay it to an event bus, or do both. Preserve the per-instance sequence when forwarding to SSE or external consumers.
+The runner publishes through `INotificationSink`. A sink may persist the event, relay it to an event bus, or do both. Preserve the per-instance sequence when forwarding to SSE or external consumers.
 
 An envelope marked `Transient` must be relayed but **not** persisted, and carries no sequence number. A sink that stores it anyway reintroduces the write amplification transience exists to avoid; one that assigns it a sequence puts a hole in the durable sequence and breaks `Last-Event-ID` catch-up.
 
 ### Custom event brokers
 
-Implement `IEventBroker` to carry domain messages over a transport of your choosing — Azure Service Bus, Kafka, NATS. Register it in place of the default `InProcessEventBroker`. `RedisEventBroker` and `RabbitMqEventBroker` are the two worked examples, and they differ enough to be worth reading as a pair: one filters client-side and can replay, the other filters at the exchange and cannot.
+Implement `IMessagingAdapter` to carry messaging over a transport of your choosing — AWS, Azure Service Bus, Kafka, NATS. The adapter supplies every messaging capability (`IDomainEventBroker` and `IControlChannel`), so registering it substitutes them together and the framework needs no change to accommodate a new transport. `RabbitMqMessagingAdapter` is the worked example; `Abacus.Adapters.Messaging.AWS` would follow exactly the same shape.
 
 Three obligations:
 
 - **Honour `DeliveryScope`.** A `Local` message must never leave the process. A broker that widens local traffic onto the wire leaks what a service declared private.
-- **Report `BrokerCapabilities` truthfully.** It is what lets composition reject an impossible subscription at startup instead of delivering locally and looking like it worked. Overstating a capability turns a startup error into a silent production gap.
+- **Report `DomainEventBrokerCapabilities` truthfully.** It is what lets composition reject an impossible subscription at startup instead of delivering locally and looking like it worked. Overstating a capability turns a startup error into a silent production gap.
 - **Distinguish consumer groups.** A named `ConsumerGroup` means exactly one member of the fleet handles each message; an unnamed one means every subscriber gets its own copy. Collapsing the two turns work routing into duplicated work, or an observer into a thief.
 
-Delivery may be at-least-once. Exactly-once resumption is the subscription store's job, not the transport's: `IEventSubscriptionStore.TryDeliverAsync` is a compare-and-set, so a redelivered message costs a lookup rather than resuming an instance twice.
+Delivery may be at-least-once. Exactly-once resumption is the subscription store's job, not the transport's: `IDomainEventSubscriptionStore.TryDeliverAsync` is a compare-and-set, so a redelivered message costs a lookup rather than resuming an instance twice.
 
 ### Custom subscription storage
 
-Implement `IEventSubscriptionStore` so triggers and waits outlive the process. `TryDeliverAsync` must be a conditional update — a relational implementation writes `UPDATE ... WHERE DeliveredMessageId IS NULL` and reports whether it won. `ClaimExpiredAsync` must mark what it returns under the same lock or transaction that selected it, or two sweepers will expire the same instance twice. Reuse `SubscriptionMatch.Matches` as the final predicate after any database-side pre-filtering, so a custom store cannot disagree with the in-memory one about what a subscription means.
+Implement `IDomainEventSubscriptionStore` so triggers and waits outlive the process. `TryDeliverAsync` must be a conditional update — a relational implementation writes `UPDATE ... WHERE DeliveredMessageId IS NULL` and reports whether it won. `ClaimExpiredAsync` must mark what it returns under the same lock or transaction that selected it, or two sweepers will expire the same instance twice. Reuse `DomainSubscriptionMatch.Matches` as the final predicate after any database-side pre-filtering, so a custom store cannot disagree with the in-memory one about what a subscription means.
 
 ## Design constraints
 
@@ -1862,15 +1878,15 @@ The usual cause is that the filter and the topic do not match: matching is ordin
 
 Tenant and correlation narrow further: a subscription that names a tenant sees only that tenant, and one that names a correlation key sees only messages carrying the identical value. A message published with no tenant does not match a subscription scoped to one.
 
-`BrokerDispatchService` counts messages that matched nothing and logs them at debug. If the count is rising, the message is arriving and the filters are wrong; if it is not, the message is not arriving.
+`DomainEventDispatcher` counts messages that matched nothing and logs them at debug. If the count is rising, the message is arriving and the filters are wrong; if it is not, the message is not arriving.
 
 Finally, a `Distributed` message needs a distributed broker. Against the in-process default the publish is refused outright, so check for a `NotSupportedException` at the publisher or a `400` from `POST /events` rather than looking for a lost message.
 
 ### An instance is stuck in `AwaitingInput`
 
-If the workflow uses `WaitForEventExecutor`, this is the normal parked state, not a fault. The instance detail page shows a **Waiting on** panel naming the topic, the blocked node and the correlation key; `GET /subscriptions?instanceId={id}&pendingOnly=true` is the same information over the API.
+If the workflow uses `WaitForDomainEventExecutor`, this is the normal parked state, not a fault. The instance detail page shows a **Waiting on** panel naming the topic, the blocked node and the correlation key; `GET /subscriptions?instanceId={id}&pendingOnly=true` is the same information over the API.
 
-A wait with no `timeout` waits forever by design. Set one, with `WaitExpiryAction.DeadStop` to fail the instance or `Resume` to let the workflow take its own timeout branch, and make sure `EventWaitSweeperService` is running — it comes with `AddBackgroundServices()`.
+A wait with no `timeout` waits forever by design. Set one, with `WaitExpiryAction.DeadStop` to fail the instance or `Resume` to let the workflow take its own timeout branch, and make sure `DomainEventWaitSweeper` is running — it comes with `AddBackgroundServices()`.
 
 ### `llm.delta` events are missing from event history
 
@@ -2094,15 +2110,15 @@ Pass the pricing service or `costUsd` is `null` — absent, not zero. See
 
 ```csharp
 public sealed class ShipOrderWorkflow
-    : IWorkflowDefinition<OrderPlaced, ShipmentResult>, IEventTriggeredWorkflow
+    : IWorkflowDefinition<OrderPlaced, ShipmentResult>, IDomainEventTriggeredWorkflow
 {
     public string Name => "ship-order";
     public string Version => "1.0.0";
 
-    public IReadOnlyList<EventTrigger> Triggers =>
+    public IReadOnlyList<DomainEventTrigger> Triggers =>
     [
-        new EventTrigger { TopicFilter = "orders.placed" },
-        new EventTrigger
+        new DomainEventTrigger { TopicFilter = "orders.placed" },
+        new DomainEventTrigger
         {
             TopicFilter = "orders.*.expedited",
             ContextSelector = m => m.PayloadJson      // remap if the payload is not the context
@@ -2123,18 +2139,18 @@ A two-workflow pipeline. The first publishes; the second parks until the reply a
 
 ```csharp
 // Producer — publishing is a side effect on the way past, so the node drops into an existing edge.
-var broker = context.Services!.GetRequiredService<IEventBroker>();
+var broker = context.Services!.GetRequiredService<IDomainEventBroker>();
 
-ExecutorBinding publish = context.Node(new PublishEventExecutor<OrderPlaced>(
+ExecutorBinding publish = context.Node(new PublishDomainEventExecutor<OrderPlaced>(
     "publish-order-placed", broker,
     topic: "orders.placed",
     correlationKey: o => o.OrderId));
 
 // Consumer — parks, releases its lease, and resumes with the payload.
-var subscriptions = context.Services!.GetRequiredService<IEventSubscriptionStore>();
+var subscriptions = context.Services!.GetRequiredService<IDomainEventSubscriptionStore>();
 
 ExecutorBinding awaitPayment = context.Node(
-    new WaitForEventExecutor<OrderContext, PaymentSettled>(
+    new WaitForDomainEventExecutor<OrderContext, PaymentSettled>(
         "await-settlement", subscriptions,
         topicFilter: "payment.settled",
         correlationKey: o => o.OrderId,

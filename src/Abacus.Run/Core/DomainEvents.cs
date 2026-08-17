@@ -3,7 +3,7 @@ using Abacus.Run.Abstractions;
 namespace Abacus.Run.Core;
 
 /// <summary>Why a subscription exists.</summary>
-public enum SubscriptionKind
+public enum DomainSubscriptionKind
 {
     /// <summary>A matching message starts a new instance of a workflow.</summary>
     Trigger,
@@ -27,10 +27,10 @@ public enum WaitExpiryAction
 /// waits are written when an instance parks and outlive any process, which is what lets an
 /// event-driven pipeline survive a restart.
 /// </summary>
-public sealed record EventSubscription
+public sealed record DomainEventSubscription
 {
     public required string SubscriptionId { get; init; }
-    public required SubscriptionKind Kind { get; init; }
+    public required DomainSubscriptionKind Kind { get; init; }
     public required string TopicFilter { get; init; }
 
     /// <summary>Null matches any correlation key; set matches only the identical value.</summary>
@@ -63,11 +63,11 @@ public sealed record EventSubscription
     public bool IsSatisfied => DeliveredMessageId is not null || Expired;
 }
 
-public sealed record SubscriptionQuery
+public sealed record DomainSubscriptionQuery
 {
     public string? InstanceId { get; init; }
     public string? Topic { get; init; }
-    public SubscriptionKind? Kind { get; init; }
+    public DomainSubscriptionKind? Kind { get; init; }
     public string? TenantId { get; init; }
 
     /// <summary>Excludes waits that have already been delivered or expired.</summary>
@@ -80,15 +80,15 @@ public sealed record SubscriptionQuery
 /// Durable subscription registry. The broker transport decides how fast a message arrives; this store
 /// decides what it means, and is the reason delivery survives a process restart.
 /// </summary>
-public interface IEventSubscriptionStore
+public interface IDomainEventSubscriptionStore
 {
-    ValueTask<EventSubscription> RegisterAsync(EventSubscription subscription, CancellationToken cancellationToken);
+    ValueTask<DomainEventSubscription> RegisterAsync(DomainEventSubscription subscription, CancellationToken cancellationToken);
 
     /// <summary>
     /// Every subscription this message satisfies: topic pattern, tenant, correlation key and scope.
     /// Waits that are already satisfied are excluded — a parked instance is resumed once.
     /// </summary>
-    ValueTask<IReadOnlyList<EventSubscription>> MatchAsync(BrokerMessage message, CancellationToken cancellationToken);
+    ValueTask<IReadOnlyList<DomainEventSubscription>> MatchAsync(DomainEventMessage message, CancellationToken cancellationToken);
 
     /// <summary>
     /// Conditionally records a delivery against a wait. Returns false when another caller got there
@@ -99,34 +99,34 @@ public interface IEventSubscriptionStore
     /// delivers at least once and replicas race each other, so a compare-and-set here is what stops
     /// one message resuming one instance twice.
     /// </remarks>
-    ValueTask<bool> TryDeliverAsync(string subscriptionId, BrokerMessage message, CancellationToken cancellationToken);
+    ValueTask<bool> TryDeliverAsync(string subscriptionId, DomainEventMessage message, CancellationToken cancellationToken);
 
     /// <summary>The wait belonging to one executor of one instance, delivered or not.</summary>
-    ValueTask<EventSubscription?> FindWaitAsync(string instanceId, string executorId, CancellationToken cancellationToken);
+    ValueTask<DomainEventSubscription?> FindWaitAsync(string instanceId, string executorId, CancellationToken cancellationToken);
 
     /// <summary>Claims expired waits, marking them so a second sweeper does not claim them again.</summary>
-    ValueTask<IReadOnlyList<EventSubscription>> ClaimExpiredAsync(DateTimeOffset now, int max, CancellationToken cancellationToken);
+    ValueTask<IReadOnlyList<DomainEventSubscription>> ClaimExpiredAsync(DateTimeOffset now, int max, CancellationToken cancellationToken);
 
-    ValueTask<IReadOnlyList<EventSubscription>> QueryAsync(SubscriptionQuery query, CancellationToken cancellationToken);
+    ValueTask<IReadOnlyList<DomainEventSubscription>> QueryAsync(DomainSubscriptionQuery query, CancellationToken cancellationToken);
 
     /// <summary>Drops every wait for an instance. Called when it terminates, so waits do not outlive it.</summary>
     ValueTask RemoveForInstanceAsync(string instanceId, CancellationToken cancellationToken);
 }
 
-/// <summary>Matching rules shared by every <see cref="IEventSubscriptionStore"/> implementation.</summary>
+/// <summary>Matching rules shared by every <see cref="IDomainEventSubscriptionStore"/> implementation.</summary>
 /// <remarks>
 /// Kept here rather than duplicated per store: a SQL implementation that pre-filters in the database
 /// still ends its query with this predicate, so the in-memory and relational stores cannot disagree
 /// about what a subscription means.
 /// </remarks>
-public static class SubscriptionMatch
+public static class DomainSubscriptionMatch
 {
-    public static bool Matches(EventSubscription subscription, BrokerMessage message)
+    public static bool Matches(DomainEventSubscription subscription, DomainEventMessage message)
     {
         ArgumentNullException.ThrowIfNull(subscription);
         ArgumentNullException.ThrowIfNull(message);
 
-        if (subscription.Kind == SubscriptionKind.Wait && subscription.IsSatisfied)
+        if (subscription.Kind == DomainSubscriptionKind.Wait && subscription.IsSatisfied)
         {
             return false;
         }
@@ -155,7 +155,7 @@ public static class SubscriptionMatch
 }
 
 /// <summary>Event types the broker adds to an instance's own progress stream.</summary>
-public static class BrokerEventTypes
+public static class DomainEventNotifications
 {
     public const string EventPublished = "event.published";
     public const string EventDelivered = "event.delivered";

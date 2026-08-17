@@ -98,7 +98,7 @@ sealed so gate evaluation and the middleware pipeline cannot be bypassed.
 ## Swapping storage and transport
 
 Every store and the event bus sit behind interfaces (`IInstanceStore`, `IEventStore`,
-`IApprovalStore`, `ICheckpointStore<JsonElement>`, `IEventBus`, and others). Register your own
+`IApprovalStore`, `ICheckpointStore<JsonElement>`, `INotificationBus`, and others). Register your own
 implementation to displace the in-memory default:
 
 ```csharp

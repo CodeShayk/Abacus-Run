@@ -10,19 +10,19 @@ namespace Abacus.Run.Executors;
 /// Pass-through rather than transforming: publishing is a side effect on the way past, so a node can
 /// be dropped into an existing edge without rewiring the graph around it.
 /// </remarks>
-public sealed class PublishEventExecutor<T> : HostExecutor<T, T>
+public sealed class PublishDomainEventExecutor<T> : HostExecutor<T, T>
     where T : class
 {
-    private readonly IEventBroker _broker;
+    private readonly IDomainEventBroker _broker;
     private readonly Func<T, string> _topic;
     private readonly Func<T, object>? _payload;
     private readonly Func<T, string?>? _correlationKey;
     private readonly DeliveryScope _scope;
     private readonly TimeProvider _clock;
 
-    public PublishEventExecutor(
+    public PublishDomainEventExecutor(
         string id,
-        IEventBroker broker,
+        IDomainEventBroker broker,
         Func<T, string> topic,
         Func<T, object>? payload = null,
         Func<T, string?>? correlationKey = null,
@@ -47,9 +47,9 @@ public sealed class PublishEventExecutor<T> : HostExecutor<T, T>
     }
 
     /// <summary>Convenience overload for a fixed topic.</summary>
-    public PublishEventExecutor(
+    public PublishDomainEventExecutor(
         string id,
-        IEventBroker broker,
+        IDomainEventBroker broker,
         string topic,
         Func<T, object>? payload = null,
         Func<T, string?>? correlationKey = null,
@@ -73,7 +73,7 @@ public sealed class PublishEventExecutor<T> : HostExecutor<T, T>
 
         object payload = _payload is null ? input : _payload(input);
 
-        await _broker.PublishAsync(new BrokerMessage
+        await _broker.PublishAsync(new DomainEventMessage
         {
             MessageId = IdGenerator.NewId("msg"),
             Topic = topic,
@@ -96,7 +96,7 @@ public sealed class PublishEventExecutor<T> : HostExecutor<T, T>
 /// <para>
 /// The first pass registers a durable wait and halts; the instance checkpoints and releases its
 /// lease, so a workflow can wait for days without costing execution capacity. When
-/// <see cref="Dispatch.BrokerDispatchService"/> records a delivery it marks the instance
+/// <see cref="Dispatch.DomainEventDispatcher"/> records a delivery it marks the instance
 /// dispatchable, the runner replays to this executor, and the second pass finds the payload and
 /// returns it.
 /// </para>
@@ -105,19 +105,19 @@ public sealed class PublishEventExecutor<T> : HostExecutor<T, T>
 /// the same one an approval gate uses, so no change to the runner is needed to support waiting.
 /// </para>
 /// </remarks>
-public sealed class WaitForEventExecutor<TIn, TPayload> : HostExecutor<TIn, TPayload>
+public sealed class WaitForDomainEventExecutor<TIn, TPayload> : HostExecutor<TIn, TPayload>
     where TPayload : class
 {
-    private readonly IEventSubscriptionStore _subscriptions;
+    private readonly IDomainEventSubscriptionStore _subscriptions;
     private readonly string _topicFilter;
     private readonly Func<TIn, string?>? _correlationKey;
     private readonly TimeSpan? _timeout;
     private readonly WaitExpiryAction _onExpiry;
     private readonly TimeProvider _clock;
 
-    public WaitForEventExecutor(
+    public WaitForDomainEventExecutor(
         string id,
-        IEventSubscriptionStore subscriptions,
+        IDomainEventSubscriptionStore subscriptions,
         string topicFilter,
         Func<TIn, string?>? correlationKey = null,
         TimeSpan? timeout = null,
@@ -144,7 +144,7 @@ public sealed class WaitForEventExecutor<TIn, TPayload> : HostExecutor<TIn, TPay
     protected override async ValueTask<TPayload> ExecuteCoreAsync(
         TIn input, IWorkflowContext context, CancellationToken cancellationToken)
     {
-        EventSubscription? existing = await _subscriptions
+        DomainEventSubscription? existing = await _subscriptions
             .FindWaitAsync(Runtime.InstanceId, Id, cancellationToken).ConfigureAwait(false);
 
         if (existing?.DeliveredPayloadJson is { } json)
@@ -163,10 +163,10 @@ public sealed class WaitForEventExecutor<TIn, TPayload> : HostExecutor<TIn, TPay
 
         if (existing is null)
         {
-            await _subscriptions.RegisterAsync(new EventSubscription
+            await _subscriptions.RegisterAsync(new DomainEventSubscription
             {
                 SubscriptionId = IdGenerator.NewId("sub"),
-                Kind = SubscriptionKind.Wait,
+                Kind = DomainSubscriptionKind.Wait,
                 TopicFilter = _topicFilter,
                 CorrelationKey = _correlationKey?.Invoke(input),
                 InstanceId = Runtime.InstanceId,

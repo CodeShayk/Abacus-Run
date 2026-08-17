@@ -100,6 +100,7 @@ public sealed class DispatcherService : BackgroundService
     private readonly WorkflowHostOptions _options;
     private readonly ILogger<DispatcherService> _logger;
     private readonly TimeProvider _clock;
+    private readonly IControlChannel? _control;
     private readonly string _replicaId;
 
     private volatile bool _claiming = true;
@@ -110,7 +111,8 @@ public sealed class DispatcherService : BackgroundService
         ConcurrencyLimiter limiter,
         IOptions<WorkflowHostOptions> options,
         ILogger<DispatcherService> logger,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        IControlChannel? control = null)
     {
         _instances = instances;
         _runners = runners;
@@ -118,6 +120,7 @@ public sealed class DispatcherService : BackgroundService
         _options = options.Value;
         _logger = logger;
         _clock = clock ?? TimeProvider.System;
+        _control = control;
         _replicaId = _options.ReplicaId
             ?? Environment.GetEnvironmentVariable("POD_NAME")
             ?? Environment.MachineName;
@@ -187,20 +190,89 @@ public sealed class DispatcherService : BackgroundService
         return leases.Count;
     }
 
+    /// <summary>
+    /// Listens for control signals aimed at this instance. Null when no channel is registered, or
+    /// when subscribing fails — the run proceeds either way, because the instance row still carries
+    /// the instruction and the next claim will see it.
+    /// </summary>
+    private async Task<IAsyncDisposable?> SubscribeToControlAsync(
+        string instanceId, CancellationTokenSource signalled)
+    {
+        if (_control is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await _control.SubscribeAsync(instanceId, signal =>
+            {
+                _logger.LogInformation(
+                    "Control signal {Action} received for instance {InstanceId}.", signal.Action, instanceId);
+
+                // Cancel and suspend both mean "stop taking steps". What the instance becomes was
+                // already decided by the row the control service wrote.
+                signalled.Cancel();
+                return Task.CompletedTask;
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not subscribe to control signals for {InstanceId}; falling back to the instance row.",
+                instanceId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Whether the instance was cancelled between being claimed and being subscribed to.
+    /// </summary>
+    private async Task<bool> WasCancelledBeforeStartAsync(string instanceId, CancellationToken cancellationToken)
+    {
+        WorkflowInstance? current = await _instances.GetAsync(instanceId, cancellationToken).ConfigureAwait(false);
+
+        return current is null || current.CancellationRequested || current.Status.IsTerminal();
+    }
+
     /// <summary>Runs one leased instance to a stopping point. Public for deterministic testing.</summary>
     public async Task RunLeasedAsync(WorkflowInstance instance, IDisposable slot, CancellationToken cancellationToken)
     {
         using (slot)
         {
             using var renewal = new CancellationTokenSource();
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, renewal.Token);
+            using var signalled = new CancellationTokenSource();
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken, renewal.Token, signalled.Token);
+
+            // Subscribe before running, so a signal sent while the graph is building is not missed.
+            IAsyncDisposable? control = await SubscribeToControlAsync(instance.InstanceId, signalled)
+                .ConfigureAwait(false);
 
             Task renewer = RenewLeaseLoopAsync(instance.InstanceId, renewal, linked.Token);
 
             try
             {
+                // Closes the race between ClaimAsync and the subscription above: a cancel that
+                // landed in that window left the flag on the row and nothing on the wire.
+                if (await WasCancelledBeforeStartAsync(instance.InstanceId, cancellationToken).ConfigureAwait(false))
+                {
+                    _logger.LogInformation(
+                        "Instance {InstanceId} was cancelled before this replica started it.", instance.InstanceId);
+                    return;
+                }
+
                 WorkflowRunner runner = _runners.Create(instance);
                 await runner.RunAsync(instance, linked.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (signalled.IsCancellationRequested)
+            {
+                // Checked before the lease-loss case: both surface as a cancelled token, and
+                // reporting an operator's cancel as a lost lease would send someone hunting a
+                // clustering problem that does not exist. The control service already wrote the
+                // terminal row, so nothing is transitioned here.
+                _logger.LogInformation(
+                    "Instance {InstanceId} stopped on an operator control signal.", instance.InstanceId);
             }
             catch (OperationCanceledException) when (renewal.IsCancellationRequested)
             {
@@ -213,6 +285,11 @@ public sealed class DispatcherService : BackgroundService
             }
             finally
             {
+                if (control is not null)
+                {
+                    await control.DisposeAsync().ConfigureAwait(false);
+                }
+
                 await renewal.CancelAsync().ConfigureAwait(false);
                 try { await renewer.ConfigureAwait(false); } catch (OperationCanceledException) { }
                 await _instances.ReleaseLeaseAsync(instance.InstanceId, _replicaId, CancellationToken.None)

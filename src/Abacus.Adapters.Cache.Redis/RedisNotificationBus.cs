@@ -6,10 +6,10 @@ using Abacus.Run.Core;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis;
 
-namespace Abacus.Run.EventBus;
+namespace Abacus.Adapters.Cache.Redis;
 
 /// <summary>
-/// Redis Streams implementation of <see cref="IEventBus"/> (TDD §10.2).
+/// Redis Streams implementation of <see cref="INotificationBus"/> (TDD §10.2).
 ///
 /// <list type="bullet">
 ///   <item><c>PublishBatchAsync</c> → <c>XADD</c> to stream <c>workflow:events:{instanceId}</c></item>
@@ -17,26 +17,56 @@ namespace Abacus.Run.EventBus;
 ///   <item>Auto-trimming via <c>MAXLEN ~</c> based on configuration</item>
 /// </list>
 /// </summary>
-public sealed class RedisEventBus : IEventBus, IAsyncDisposable
+public sealed class RedisNotificationBus : INotificationBus, IAsyncDisposable
 {
     private const string StreamKeyPrefix = "workflow:events:";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     private readonly IConnectionMultiplexer _redis;
-    private readonly ILogger<RedisEventBus>? _logger;
+    private readonly ILogger<RedisNotificationBus>? _logger;
     private readonly int _maxStreamLength;
 
-    public RedisEventBus(
+    public RedisNotificationBus(
         IConnectionMultiplexer redis,
         int maxStreamLength = 10_000,
-        ILogger<RedisEventBus>? logger = null)
+        ILogger<RedisNotificationBus>? logger = null)
     {
         _redis = redis;
         _maxStreamLength = maxStreamLength;
         _logger = logger;
     }
 
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(100);
+
     private static string StreamKey(string instanceId) => $"{StreamKeyPrefix}{instanceId}";
+
+    /// <summary>
+    /// The stream's current last id, or <c>0-0</c> when the stream does not exist yet.
+    /// </summary>
+    /// <remarks>
+    /// A subscriber wants what happens from now on, not the history — backfill is the durable event
+    /// store's job, and the SSE path reads that first. Starting at the resolved tail gives exactly
+    /// that. When nothing has been published yet there is no tail, and <c>0-0</c> is both correct and
+    /// equivalent: an empty stream has no history to replay.
+    /// </remarks>
+    private static async Task<string> ResolveTailAsync(IDatabase db, string key)
+    {
+        try
+        {
+            if (await db.KeyExistsAsync(key).ConfigureAwait(false))
+            {
+                StreamInfo info = await db.StreamInfoAsync(key).ConfigureAwait(false);
+                return info.LastGeneratedId.ToString();
+            }
+        }
+        catch (RedisException)
+        {
+            // Raced with a trim or an expiry. Starting from the beginning of a stream that just
+            // vanished costs nothing.
+        }
+
+        return "0-0";
+    }
 
     public async ValueTask PublishBatchAsync(IReadOnlyList<EventEnvelope> events, CancellationToken cancellationToken)
     {
@@ -89,14 +119,20 @@ public sealed class RedisEventBus : IEventBus, IAsyncDisposable
     {
         IDatabase db = _redis.GetDatabase();
         string key = StreamKey(instanceId);
-        string lastId = "$"; // Only new messages
+
+        // Resolve the tail to a concrete id before reading anything.
+        //
+        // "$" means "entries added after this read starts blocking", which is meaningful only to a
+        // blocking XREAD. StackExchange.Redis exposes no blocking read, so a non-blocking XREAD from
+        // "$" returns nothing and — because nothing arrived — never advances past "$" either. Left as
+        // it was, this loop polls forever and yields nothing at all.
+        string lastId = await ResolveTailAsync(db, key).ConfigureAwait(false);
 
         while (!cancellationToken.IsCancellationRequested)
         {
             StreamEntry[]? entries;
             try
             {
-                // Block for up to 5 seconds waiting for new entries.
                 entries = await db.StreamReadAsync(key, lastId, count: 100).ConfigureAwait(false);
             }
             catch (RedisException ex)
@@ -108,8 +144,9 @@ public sealed class RedisEventBus : IEventBus, IAsyncDisposable
 
             if (entries is null || entries.Length == 0)
             {
-                // No new entries; wait briefly before polling again.
-                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                // No new entries; wait briefly before polling again. This interval is the backplane's
+                // added latency, and it is the price of having no blocking read available.
+                await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
                 continue;
             }
 
@@ -162,95 +199,5 @@ public sealed class RedisEventBus : IEventBus, IAsyncDisposable
     {
         // The IConnectionMultiplexer is owned by DI; we don't dispose it here.
         return ValueTask.CompletedTask;
-    }
-}
-
-/// <summary>
-/// Redis Pub/Sub channel for control signals (e.g., <c>control.cancel</c>).
-/// Used by <c>InstanceControlService</c> to signal the owning replica to cancel a running
-/// instance (§11.2). The owning replica's <c>WorkflowRunner</c> subscribes to this channel.
-/// </summary>
-public sealed class RedisControlChannel : IAsyncDisposable
-{
-    private const string ControlChannelPrefix = "workflow:control:";
-    private readonly ISubscriber _subscriber;
-    private readonly ILogger<RedisControlChannel>? _logger;
-
-    public RedisControlChannel(IConnectionMultiplexer redis, ILogger<RedisControlChannel>? logger = null)
-    {
-        _subscriber = redis.GetSubscriber();
-        _logger = logger;
-    }
-
-    /// <summary>Publishes a control message to all subscribers for the given instance.</summary>
-    public async Task PublishAsync(string instanceId, string action, string? reason = null, CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        string channel = $"{ControlChannelPrefix}{instanceId}";
-        string message = JsonSerializer.Serialize(new { action, reason, timestamp = DateTimeOffset.UtcNow });
-
-        try
-        {
-            await _subscriber.PublishAsync(RedisChannel.Literal(channel), message).ConfigureAwait(false);
-        }
-        catch (RedisException ex)
-        {
-            _logger?.LogWarning(ex, "Failed to publish control message to {Channel}.", channel);
-        }
-    }
-
-    /// <summary>
-    /// Subscribes to control messages for a specific instance. Returns an unsubscribe handle.
-    /// The <paramref name="handler"/> receives the action string (e.g. "cancel") and optional reason.
-    /// </summary>
-    public async Task<IAsyncDisposable> SubscribeAsync(
-        string instanceId,
-        Func<string, string?, Task> handler)
-    {
-        string channel = $"{ControlChannelPrefix}{instanceId}";
-
-        await _subscriber.SubscribeAsync(
-            RedisChannel.Literal(channel),
-            async (_, message) =>
-            {
-                try
-                {
-                    using JsonDocument doc = JsonDocument.Parse((string)message!);
-                    string action = doc.RootElement.GetProperty("action").GetString() ?? "";
-                    string? reason = doc.RootElement.TryGetProperty("reason", out JsonElement r)
-                        ? r.GetString()
-                        : null;
-                    await handler(action, reason).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning(ex, "Error processing control message on {Channel}.", channel);
-                }
-            }).ConfigureAwait(false);
-
-        return new Unsubscriber(_subscriber, channel);
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        await _subscriber.UnsubscribeAllAsync().ConfigureAwait(false);
-    }
-
-    private sealed class Unsubscriber : IAsyncDisposable
-    {
-        private readonly ISubscriber _subscriber;
-        private readonly string _channel;
-
-        public Unsubscriber(ISubscriber subscriber, string channel)
-        {
-            _subscriber = subscriber;
-            _channel = channel;
-        }
-
-        public async ValueTask DisposeAsync()
-        {
-            await _subscriber.UnsubscribeAsync(RedisChannel.Literal(_channel)).ConfigureAwait(false);
-        }
     }
 }

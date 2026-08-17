@@ -35,7 +35,7 @@ public static class Sse
         long fromExclusive,
         bool isTerminal,
         IEventStore store,
-        IEventBus? bus,
+        INotificationBus? bus,
         CancellationToken cancellationToken,
         TimeSpan? heartbeat = null)
     {

@@ -1,18 +1,20 @@
 using System.Text;
 using System.Text.Json;
 using Abacus.Run.Abstractions;
+using Abacus.Run.Messaging;
+using Abacus.Run.Notifications;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
-namespace Abacus.Run.EventBus;
+namespace Abacus.Adapters.Messaging.RabbitMQ;
 
 /// <summary>
-/// Cross-service <see cref="IEventBroker"/> over RabbitMQ.
+/// Cross-service <see cref="IDomainEventBroker"/> over RabbitMQ.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Like <see cref="RedisEventBroker"/>, this is the in-process broker <em>plus a wire</em>. A
+/// Like the Redis broker, this is the in-process broker <em>plus a wire</em>. A
 /// <see cref="DeliveryScope.Local"/> message never touches the network; a
 /// <see cref="DeliveryScope.Distributed"/> one goes to the exchange and comes back through each
 /// service's own queue, including the publisher's. Publishing does not also deliver locally, because
@@ -22,7 +24,7 @@ namespace Abacus.Run.EventBus;
 /// RabbitMQ maps onto the abstraction more directly than Redis does. A topic exchange does the
 /// filtering server-side, so a subscriber is not woken for messages it would discard, and the
 /// broadcast/competing distinction is just queue ownership: a named
-/// <see cref="EventSubscriptionOptions.ConsumerGroup"/> becomes one durable queue that every replica
+/// <see cref="DomainEventSubscriptionOptions.ConsumerGroup"/> becomes one durable queue that every replica
 /// consumes from, so exactly one member handles each message; an unnamed group becomes an exclusive
 /// auto-delete queue private to this subscriber.
 /// </para>
@@ -32,7 +34,7 @@ namespace Abacus.Run.EventBus;
 /// <see cref="TopicPattern"/> already means by them, so filters pass through unchanged.
 /// </para>
 /// </remarks>
-public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
+public sealed class RabbitMqDomainEventBroker : IDomainEventBroker, IAsyncDisposable
 {
     private const string Exchange = "abacus.events";
     private const string DeadLetterExchange = "abacus.events.dead";
@@ -40,18 +42,18 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     private readonly IConnection _connection;
-    private readonly InProcessEventBroker _local;
+    private readonly InProcessDomainEventBroker _local;
     private readonly ILoggerFactory? _loggerFactory;
-    private readonly ILogger<RabbitMqEventBroker>? _logger;
+    private readonly ILogger<RabbitMqDomainEventBroker>? _logger;
     private readonly SemaphoreSlim _publishLock = new(1, 1);
     private IChannel? _publishChannel;
 
-    private RabbitMqEventBroker(IConnection connection, ILoggerFactory? loggerFactory)
+    private RabbitMqDomainEventBroker(IConnection connection, ILoggerFactory? loggerFactory)
     {
         _connection = connection;
         _loggerFactory = loggerFactory;
-        _logger = loggerFactory?.CreateLogger<RabbitMqEventBroker>();
-        _local = new InProcessEventBroker(loggerFactory?.CreateLogger<InProcessEventBroker>());
+        _logger = loggerFactory?.CreateLogger<RabbitMqDomainEventBroker>();
+        _local = new InProcessDomainEventBroker(loggerFactory?.CreateLogger<InProcessDomainEventBroker>());
     }
 
     /// <summary>
@@ -59,7 +61,7 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
     /// topology calls are async, and doing them lazily on first publish would hide a broken
     /// configuration until the first message rather than at startup.
     /// </summary>
-    public static async Task<RabbitMqEventBroker> CreateAsync(
+    public static async Task<RabbitMqDomainEventBroker> CreateAsync(
         string connectionString,
         ILoggerFactory? loggerFactory = null,
         CancellationToken cancellationToken = default)
@@ -85,10 +87,10 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
                 cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
-        return new RabbitMqEventBroker(connection, loggerFactory);
+        return new RabbitMqDomainEventBroker(connection, loggerFactory);
     }
 
-    public BrokerCapabilities Capabilities { get; } = new()
+    public DomainEventBrokerCapabilities Capabilities { get; } = new()
     {
         SupportsDistributed = true,
         SupportsCompetingConsumers = true,
@@ -101,13 +103,13 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
         MaxPayloadBytes = 1024 * 1024
     };
 
-    public ValueTask PublishAsync(BrokerMessage message, CancellationToken cancellationToken)
+    public ValueTask PublishAsync(DomainEventMessage message, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(message);
         return PublishBatchAsync([message], cancellationToken);
     }
 
-    public async ValueTask PublishBatchAsync(IReadOnlyList<BrokerMessage> messages, CancellationToken cancellationToken)
+    public async ValueTask PublishBatchAsync(IReadOnlyList<DomainEventMessage> messages, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(messages);
         if (messages.Count == 0)
@@ -115,7 +117,7 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
             return;
         }
 
-        foreach (BrokerMessage message in messages)
+        foreach (DomainEventMessage message in messages)
         {
             if (!TopicPattern.IsValidTopic(message.Topic, out string? error))
             {
@@ -131,13 +133,13 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
             }
         }
 
-        BrokerMessage[] local = [.. messages.Where(m => m.Scope == DeliveryScope.Local)];
+        DomainEventMessage[] local = [.. messages.Where(m => m.Scope == DeliveryScope.Local)];
         if (local.Length > 0)
         {
             await _local.PublishBatchAsync(local, cancellationToken).ConfigureAwait(false);
         }
 
-        BrokerMessage[] distributed = [.. messages.Where(m => m.Scope == DeliveryScope.Distributed)];
+        DomainEventMessage[] distributed = [.. messages.Where(m => m.Scope == DeliveryScope.Distributed)];
         if (distributed.Length == 0)
         {
             return;
@@ -145,7 +147,7 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
 
         IChannel channel = await PublishChannelAsync(cancellationToken).ConfigureAwait(false);
 
-        foreach (BrokerMessage message in distributed)
+        foreach (DomainEventMessage message in distributed)
         {
             var properties = new BasicProperties
             {
@@ -164,8 +166,8 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
     }
 
     public async ValueTask<IAsyncDisposable> SubscribeAsync(
-        EventSubscriptionOptions options,
-        Func<EventDelivery, CancellationToken, ValueTask<DeliveryResult>> handler,
+        DomainEventSubscriptionOptions options,
+        Func<DomainEventDelivery, CancellationToken, ValueTask<DeliveryResult>> handler,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -175,7 +177,7 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
         if (options.Start == SubscriptionStart.Earliest)
         {
             throw new NotSupportedException(
-                $"{nameof(RabbitMqEventBroker)} binds a queue at subscribe time and cannot read back through " +
+                $"{nameof(RabbitMqDomainEventBroker)} binds a queue at subscribe time and cannot read back through " +
                 "history, so Earliest would silently behave as Now.");
         }
 
@@ -197,8 +199,8 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
     }
 
     private async Task<IAsyncDisposable> SubscribeToQueueAsync(
-        EventSubscriptionOptions options,
-        Func<EventDelivery, CancellationToken, ValueTask<DeliveryResult>> handler,
+        DomainEventSubscriptionOptions options,
+        Func<DomainEventDelivery, CancellationToken, ValueTask<DeliveryResult>> handler,
         CancellationToken cancellationToken)
     {
         IChannel channel = await _connection.CreateChannelAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -235,7 +237,7 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
 
         consumer.ReceivedAsync += async (_, args) =>
         {
-            BrokerMessage? message = FromDelivery(args);
+            DomainEventMessage? message = FromDelivery(args);
 
             if (message is null)
             {
@@ -255,7 +257,7 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
 
             try
             {
-                DeliveryResult result = await handler(new EventDelivery
+                DeliveryResult result = await handler(new DomainEventDelivery
                 {
                     Message = message,
                     SubscriptionId = subscriptionId,
@@ -332,7 +334,7 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
         }
     }
 
-    private static Dictionary<string, object?> Headers(BrokerMessage message)
+    private static Dictionary<string, object?> Headers(DomainEventMessage message)
     {
         var headers = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
@@ -350,13 +352,13 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
         return headers;
     }
 
-    private static BrokerMessage? FromDelivery(BasicDeliverEventArgs args)
+    private static DomainEventMessage? FromDelivery(BasicDeliverEventArgs args)
     {
         try
         {
             IDictionary<string, object?>? headers = args.BasicProperties.Headers;
 
-            return new BrokerMessage
+            return new DomainEventMessage
             {
                 MessageId = args.BasicProperties.MessageId ?? "",
                 Topic = args.RoutingKey,
@@ -387,7 +389,7 @@ public sealed class RabbitMqEventBroker : IEventBroker, IAsyncDisposable
                 : null;
     }
 
-    private static bool Matches(EventSubscriptionOptions options, BrokerMessage message)
+    private static bool Matches(DomainEventSubscriptionOptions options, DomainEventMessage message)
     {
         if (options.TenantId is not null &&
             !string.Equals(options.TenantId, message.TenantId, StringComparison.Ordinal))

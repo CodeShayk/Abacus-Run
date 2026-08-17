@@ -1,6 +1,8 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Abacus.Run/Abacus.Run.csproj" />
+    <Project Path="src/Abacus.Adapters.Cache.Redis/Abacus.Adapters.Cache.Redis.csproj" />
+    <Project Path="src/Abacus.Adapters.Messaging.RabbitMQ/Abacus.Adapters.Messaging.RabbitMQ.csproj" />
     <Project Path="src/Abacus.Run.Service/Abacus.Run.Service.csproj" />
   </Folder>
   <Folder Name="/tests/">

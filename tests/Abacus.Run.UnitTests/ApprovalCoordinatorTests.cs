@@ -21,7 +21,7 @@ public class ApprovalCoordinatorTests
     {
         _instances = new InMemoryInstanceStore(_clock);
         _coordinator = new ApprovalCoordinator(
-            _approvals, _instances, new DirectEventSink(_events), new EventSequencer(), _audit, _clock);
+            _approvals, _instances, new DirectNotificationSink(_events), new NotificationSequencer(), _audit, _clock);
     }
 
     private async Task<WorkflowInstance> SeedInstanceAsync(string id = "i1")

@@ -361,7 +361,7 @@ public class InstanceControlServiceTests
     {
         _instances = new InMemoryInstanceStore(_clock);
         _control = new InstanceControlService(
-            _instances, _approvals, new DirectEventSink(_events), new EventSequencer(), _audit,
+            _instances, _approvals, new DirectNotificationSink(_events), new NotificationSequencer(), _audit,
             new WorkflowRegistry([new SampleWorkflow()]), _checkpoints, _clock);
     }
 
@@ -484,7 +484,7 @@ public class InstanceControlServiceTests
     public async Task Restart_binds_to_the_current_version()
     {
         var control = new InstanceControlService(
-            _instances, _approvals, new DirectEventSink(_events), new EventSequencer(), _audit,
+            _instances, _approvals, new DirectNotificationSink(_events), new NotificationSequencer(), _audit,
             new WorkflowRegistry([new SampleWorkflow("sample", "1.0.0"), new SampleWorkflow("sample", "5.0.0")]),
             _checkpoints, _clock);
 
@@ -499,7 +499,7 @@ public class InstanceControlServiceTests
     public async Task Restart_of_a_withdrawn_workflow_conflicts()
     {
         var control = new InstanceControlService(
-            _instances, _approvals, new DirectEventSink(_events), new EventSequencer(), _audit,
+            _instances, _approvals, new DirectNotificationSink(_events), new NotificationSequencer(), _audit,
             new WorkflowRegistry([]), _checkpoints, _clock);
 
         await SeedAsync(status: InstanceStatus.Failed);
@@ -564,7 +564,7 @@ public class InstanceControlServiceTests
     public async Task Resume_of_a_withdrawn_version_is_refused()
     {
         var control = new InstanceControlService(
-            _instances, _approvals, new DirectEventSink(_events), new EventSequencer(), _audit,
+            _instances, _approvals, new DirectNotificationSink(_events), new NotificationSequencer(), _audit,
             new WorkflowRegistry([new SampleWorkflow("sample", "9.9.9")]), _checkpoints, _clock);
 
         await SeedAsync(status: InstanceStatus.Failed, checkpointId: "ck-1");

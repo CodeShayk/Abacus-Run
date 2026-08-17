@@ -2,10 +2,10 @@ using System.Threading.Channels;
 using Abacus.Run.Abstractions;
 using Abacus.Run.Core;
 
-namespace Abacus.Run.Api;
+namespace Abacus.Run.Notifications;
 
 /// <summary>In-process event bus. Substitutable with Redis Streams without touching the SSE path.</summary>
-public sealed class InMemoryEventBus : IEventBus, IDisposable
+public sealed class InMemoryNotificationBus : INotificationBus, IDisposable
 {
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<Channel<EventEnvelope>>> _subscribers =
         new(StringComparer.Ordinal);

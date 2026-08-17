@@ -28,16 +28,16 @@ public sealed class ApprovalCoordinator : IApprovalService
 {
     private readonly IApprovalStore _approvals;
     private readonly IInstanceStore _instances;
-    private readonly IEventSink _events;
-    private readonly EventSequencer _sequencer;
+    private readonly INotificationSink _events;
+    private readonly NotificationSequencer _sequencer;
     private readonly IAuditStore? _audit;
     private readonly TimeProvider _clock;
 
     public ApprovalCoordinator(
         IApprovalStore approvals,
         IInstanceStore instances,
-        IEventSink events,
-        EventSequencer sequencer,
+        INotificationSink events,
+        NotificationSequencer sequencer,
         IAuditStore? audit = null,
         TimeProvider? clock = null)
     {
@@ -85,7 +85,7 @@ public sealed class ApprovalCoordinator : IApprovalService
 
         ApprovalRequest created = await _approvals.CreateAsync(request, cancellationToken).ConfigureAwait(false);
 
-        await PublishAsync(EventFactory.ApprovalRequested(created), cancellationToken).ConfigureAwait(false);
+        await PublishAsync(NotificationFactory.ApprovalRequested(created), cancellationToken).ConfigureAwait(false);
 
         return created;
     }
@@ -167,7 +167,7 @@ public sealed class ApprovalCoordinator : IApprovalService
             OccurredAt = decision.DecidedAt
         }, cancellationToken).ConfigureAwait(false);
 
-        await PublishAsync(EventFactory.ApprovalDecided(approval, decision, newState), cancellationToken).ConfigureAwait(false);
+        await PublishAsync(NotificationFactory.ApprovalDecided(approval, decision, newState), cancellationToken).ConfigureAwait(false);
 
         if (newState is null)
         {
@@ -252,7 +252,7 @@ public sealed class ApprovalCoordinator : IApprovalService
                 break;
         }
 
-        await PublishAsync(EventFactory.ApprovalExpired(approval), cancellationToken).ConfigureAwait(false);
+        await PublishAsync(NotificationFactory.ApprovalExpired(approval), cancellationToken).ConfigureAwait(false);
     }
 
     private static bool IsAuthorized(ApprovalRequest approval, string deciderId, ClaimsPrincipal? user, out string? denial)

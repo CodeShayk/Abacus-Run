@@ -7,7 +7,7 @@ namespace Abacus.Run.Core;
 /// <see cref="HostExecutorRuntime"/>.
 /// </summary>
 /// <remarks>
-/// It publishes through the same <see cref="IEventSink"/> and the same <see cref="EventSequencer"/>
+/// It publishes through the same <see cref="INotificationSink"/> and the same <see cref="NotificationSequencer"/>
 /// the runner uses. That shared sequencer is the point: a custom event lands correctly interleaved
 /// with the lifecycle events around it, rather than on a parallel numbering that a consumer would
 /// have to reconcile.
@@ -21,8 +21,8 @@ public sealed class NodeNotifier : INodeNotifier
     private readonly string? _tenantId;
     private readonly string? _workflowName;
     private readonly string _executorId;
-    private readonly IEventSink _events;
-    private readonly EventSequencer _sequencer;
+    private readonly INotificationSink _events;
+    private readonly NotificationSequencer _sequencer;
     private readonly NotificationPolicy _policy;
     private readonly Func<int> _superstep;
     private readonly TimeProvider _clock;
@@ -31,8 +31,8 @@ public sealed class NodeNotifier : INodeNotifier
         string instanceId,
         string? tenantId,
         string executorId,
-        IEventSink events,
-        EventSequencer sequencer,
+        INotificationSink events,
+        NotificationSequencer sequencer,
         NotificationPolicy policy,
         Func<int> superstep,
         TimeProvider clock,
@@ -85,7 +85,7 @@ public sealed class NodeNotifier : INodeNotifier
         // A stream-only event takes no sequence number, so the durable sequence stays gapless.
         long sequence = delivery == EventDeliveryMode.StreamOnly ? 0 : _sequencer.Next(_instanceId);
 
-        EventEnvelope envelope = EventFactory.Create(
+        EventEnvelope envelope = NotificationFactory.Create(
             _instanceId, sequence, eventType, payload,
             _executorId, _superstep(), _tenantId, _clock.GetUtcNow(), _workflowName, delivery);
 

@@ -17,8 +17,8 @@ public sealed class WorkflowRunnerDependencies
 {
     public required IWorkflowRegistry Registry { get; init; }
     public required IInstanceStore Instances { get; init; }
-    public required IEventSink Events { get; init; }
-    public required EventSequencer Sequencer { get; init; }
+    public required INotificationSink Events { get; init; }
+    public required NotificationSequencer Sequencer { get; init; }
     public required MiddlewarePipelineFactory Pipelines { get; init; }
     public required ICheckpointStore<JsonElement> Checkpoints { get; init; }
     public IApprovalStore? Approvals { get; init; }
@@ -33,7 +33,7 @@ public sealed class WorkflowRunnerDependencies
     public IAuditRecordStore? AuditRecords { get; init; }
 
     /// <summary>Present when the host runs the event broker; used to drop waits on termination.</summary>
-    public IEventSubscriptionStore? EventSubscriptions { get; init; }
+    public IDomainEventSubscriptionStore? EventSubscriptions { get; init; }
     public ILogStore? Logs { get; init; }
     public IServiceProvider? Services { get; init; }
     public WorkflowHostOptions Options { get; init; } = new();
@@ -273,10 +273,10 @@ public sealed class WorkflowRunner
         // downstream node had never run.
         if (_deps.EventSubscriptions is { } subscriptions)
         {
-            IReadOnlyList<EventSubscription> waits = await subscriptions.QueryAsync(new SubscriptionQuery
+            IReadOnlyList<DomainEventSubscription> waits = await subscriptions.QueryAsync(new DomainSubscriptionQuery
             {
                 InstanceId = instance.InstanceId,
-                Kind = SubscriptionKind.Wait,
+                Kind = DomainSubscriptionKind.Wait,
                 PendingOnly = true
             }, cancellationToken).ConfigureAwait(false);
 
@@ -507,7 +507,7 @@ public sealed class WorkflowRunner
         }
 
         return _deps.Events.PublishAsync(
-            EventFactory.Create(
+            NotificationFactory.Create(
                 instance.InstanceId, _deps.Sequencer.Next(instance.InstanceId), eventType, payload,
                 executorId, _currentSuperstep, instance.TenantId, _deps.Clock.GetUtcNow(),
                 instance.WorkflowName, _notifications.DeliveryFor(EventDeliveryMode.StreamAndLog)),
@@ -534,7 +534,7 @@ public sealed class WorkflowRunner
         }
 
         return _deps.Events.PublishAsync(
-            EventFactory.Create(
+            NotificationFactory.Create(
                 instance.InstanceId, 0, eventType, payload,
                 executorId, _currentSuperstep, instance.TenantId, _deps.Clock.GetUtcNow(),
                 instance.WorkflowName, EventDeliveryMode.StreamOnly),

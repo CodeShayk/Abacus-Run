@@ -1,5 +1,5 @@
 using Abacus.Run.Abstractions;
-using Abacus.Run.EventBus;
+using Abacus.Adapters.Messaging.RabbitMQ;
 using FluentAssertions;
 using Xunit;
 
@@ -24,9 +24,9 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
     }
 
     /// <summary>One broker stands in for one service; two of them share the container.</summary>
-    private async Task<RabbitMqEventBroker> BrokerAsync()
+    private async Task<RabbitMqDomainEventBroker> BrokerAsync()
     {
-        RabbitMqEventBroker broker = await RabbitMqEventBroker.CreateAsync(_rabbit.ConnectionString);
+        RabbitMqDomainEventBroker broker = await RabbitMqDomainEventBroker.CreateAsync(_rabbit.ConnectionString);
         _disposables.Add(broker);
         return broker;
     }
@@ -34,12 +34,12 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
     [RequiresDockerFact]
     public async Task Delivers_a_distributed_message_across_two_brokers()
     {
-        RabbitMqEventBroker publisher = await BrokerAsync();
-        RabbitMqEventBroker consumer = await BrokerAsync();
+        RabbitMqDomainEventBroker publisher = await BrokerAsync();
+        RabbitMqDomainEventBroker consumer = await BrokerAsync();
         var recorder = new DeliveryRecorder();
 
         _disposables.Add(await consumer.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "orders.#" }, recorder.Handler, default));
+            new DomainEventSubscriptionOptions { TopicFilter = "orders.#" }, recorder.Handler, default));
 
         await publisher.PublishAsync(Msg.Distributed("orders.placed"), default);
 
@@ -50,12 +50,12 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
     [RequiresDockerFact]
     public async Task A_local_message_never_reaches_another_broker()
     {
-        RabbitMqEventBroker publisher = await BrokerAsync();
-        RabbitMqEventBroker consumer = await BrokerAsync();
+        RabbitMqDomainEventBroker publisher = await BrokerAsync();
+        RabbitMqDomainEventBroker consumer = await BrokerAsync();
         var recorder = new DeliveryRecorder();
 
         _disposables.Add(await consumer.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "#" }, recorder.Handler, default));
+            new DomainEventSubscriptionOptions { TopicFilter = "#" }, recorder.Handler, default));
 
         await publisher.PublishAsync(Msg.Local("orders.placed"), default);
 
@@ -66,11 +66,11 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
     [RequiresDockerFact]
     public async Task A_local_message_still_reaches_subscribers_in_the_publishing_service()
     {
-        RabbitMqEventBroker broker = await BrokerAsync();
+        RabbitMqDomainEventBroker broker = await BrokerAsync();
         var recorder = new DeliveryRecorder();
 
         _disposables.Add(await broker.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "#" }, recorder.Handler, default));
+            new DomainEventSubscriptionOptions { TopicFilter = "#" }, recorder.Handler, default));
 
         await broker.PublishAsync(Msg.Local("orders.placed"), default);
 
@@ -80,13 +80,13 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
     [RequiresDockerFact]
     public async Task A_named_consumer_group_delivers_to_exactly_one_member()
     {
-        RabbitMqEventBroker publisher = await BrokerAsync();
-        RabbitMqEventBroker replicaA = await BrokerAsync();
-        RabbitMqEventBroker replicaB = await BrokerAsync();
+        RabbitMqDomainEventBroker publisher = await BrokerAsync();
+        RabbitMqDomainEventBroker replicaA = await BrokerAsync();
+        RabbitMqDomainEventBroker replicaB = await BrokerAsync();
 
         var a = new DeliveryRecorder();
         var b = new DeliveryRecorder();
-        var options = new EventSubscriptionOptions
+        var options = new DomainEventSubscriptionOptions
         {
             TopicFilter = "work.#",
             ConsumerGroup = $"workers-{Guid.NewGuid():N}"
@@ -105,13 +105,13 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
     [RequiresDockerFact]
     public async Task An_unnamed_group_gives_every_subscriber_its_own_copy()
     {
-        RabbitMqEventBroker publisher = await BrokerAsync();
-        RabbitMqEventBroker watcherA = await BrokerAsync();
-        RabbitMqEventBroker watcherB = await BrokerAsync();
+        RabbitMqDomainEventBroker publisher = await BrokerAsync();
+        RabbitMqDomainEventBroker watcherA = await BrokerAsync();
+        RabbitMqDomainEventBroker watcherB = await BrokerAsync();
 
         var a = new DeliveryRecorder();
         var b = new DeliveryRecorder();
-        var options = new EventSubscriptionOptions { TopicFilter = "audit.#" };
+        var options = new DomainEventSubscriptionOptions { TopicFilter = "audit.#" };
 
         _disposables.Add(await watcherA.SubscribeAsync(options, a.Handler, default));
         _disposables.Add(await watcherB.SubscribeAsync(options, b.Handler, default));
@@ -129,12 +129,12 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
     [RequiresDockerFact]
     public async Task Topic_filters_are_honoured_by_the_exchange()
     {
-        RabbitMqEventBroker publisher = await BrokerAsync();
-        RabbitMqEventBroker consumer = await BrokerAsync();
+        RabbitMqDomainEventBroker publisher = await BrokerAsync();
+        RabbitMqDomainEventBroker consumer = await BrokerAsync();
         var recorder = new DeliveryRecorder();
 
         _disposables.Add(await consumer.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "orders.*.shipped" }, recorder.Handler, default));
+            new DomainEventSubscriptionOptions { TopicFilter = "orders.*.shipped" }, recorder.Handler, default));
 
         await publisher.PublishAsync(Msg.Distributed("orders.eu.west.shipped"), default);   // too deep for *
         await publisher.PublishAsync(Msg.Distributed("payments.settled"), default);         // wrong prefix
@@ -148,12 +148,12 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
     [RequiresDockerFact]
     public async Task Hash_matches_the_remainder_including_nothing()
     {
-        RabbitMqEventBroker publisher = await BrokerAsync();
-        RabbitMqEventBroker consumer = await BrokerAsync();
+        RabbitMqDomainEventBroker publisher = await BrokerAsync();
+        RabbitMqDomainEventBroker consumer = await BrokerAsync();
         var recorder = new DeliveryRecorder();
 
         _disposables.Add(await consumer.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "orders.#" }, recorder.Handler, default));
+            new DomainEventSubscriptionOptions { TopicFilter = "orders.#" }, recorder.Handler, default));
 
         await publisher.PublishAsync(Msg.Distributed("orders"), default);
         await publisher.PublishAsync(Msg.Distributed("orders.eu.west.placed"), default);
@@ -165,12 +165,12 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
     [RequiresDockerFact]
     public async Task Tenant_and_correlation_narrow_delivery()
     {
-        RabbitMqEventBroker publisher = await BrokerAsync();
-        RabbitMqEventBroker consumer = await BrokerAsync();
+        RabbitMqDomainEventBroker publisher = await BrokerAsync();
+        RabbitMqDomainEventBroker consumer = await BrokerAsync();
         var recorder = new DeliveryRecorder();
 
         _disposables.Add(await consumer.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "#", TenantId = "acme", CorrelationKey = "ORD-1" },
+            new DomainEventSubscriptionOptions { TopicFilter = "#", TenantId = "acme", CorrelationKey = "ORD-1" },
             recorder.Handler, default));
 
         await publisher.PublishAsync(Msg.Distributed("orders.placed", "ORD-2", "acme"), default);
@@ -184,14 +184,14 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
     [RequiresDockerFact]
     public async Task Message_provenance_survives_the_wire()
     {
-        RabbitMqEventBroker publisher = await BrokerAsync();
-        RabbitMqEventBroker consumer = await BrokerAsync();
+        RabbitMqDomainEventBroker publisher = await BrokerAsync();
+        RabbitMqDomainEventBroker consumer = await BrokerAsync();
         var recorder = new DeliveryRecorder();
 
         _disposables.Add(await consumer.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "#" }, recorder.Handler, default));
+            new DomainEventSubscriptionOptions { TopicFilter = "#" }, recorder.Handler, default));
 
-        var sent = new BrokerMessage
+        var sent = new DomainEventMessage
         {
             MessageId = "msg_fixed_2",
             Topic = "orders.placed",
@@ -206,7 +206,7 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
         await publisher.PublishAsync(sent, default);
         (await recorder.WaitAsync(1)).Should().BeTrue();
 
-        BrokerMessage received = recorder.Messages[0];
+        DomainEventMessage received = recorder.Messages[0];
         received.MessageId.Should().Be("msg_fixed_2", "de-duplication downstream depends on it");
         received.TenantId.Should().Be("acme");
         received.SourceInstanceId.Should().Be("inst_1");
@@ -217,14 +217,14 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
     [RequiresDockerFact]
     public async Task A_batch_arrives_whole()
     {
-        RabbitMqEventBroker publisher = await BrokerAsync();
-        RabbitMqEventBroker consumer = await BrokerAsync();
+        RabbitMqDomainEventBroker publisher = await BrokerAsync();
+        RabbitMqDomainEventBroker consumer = await BrokerAsync();
         var recorder = new DeliveryRecorder();
 
         _disposables.Add(await consumer.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "bulk.#" }, recorder.Handler, default));
+            new DomainEventSubscriptionOptions { TopicFilter = "bulk.#" }, recorder.Handler, default));
 
-        BrokerMessage[] batch = [.. Enumerable.Range(0, 25).Select(i => Msg.Distributed($"bulk.item.{i}"))];
+        DomainEventMessage[] batch = [.. Enumerable.Range(0, 25).Select(i => Msg.Distributed($"bulk.item.{i}"))];
         await publisher.PublishBatchAsync(batch, default);
 
         (await recorder.WaitAsync(25)).Should().BeTrue();
@@ -233,13 +233,13 @@ public class RabbitMqEventBrokerTests : IAsyncLifetime
     [RequiresDockerFact]
     public async Task Replay_is_refused_rather_than_silently_behaving_as_now()
     {
-        RabbitMqEventBroker broker = await BrokerAsync();
+        RabbitMqDomainEventBroker broker = await BrokerAsync();
 
         broker.Capabilities.SupportsReplay.Should()
             .BeFalse("a queue holds what arrives after it is bound; claiming replay would be a lie");
 
         Func<Task> subscribe = () => broker.SubscribeAsync(
-            new EventSubscriptionOptions { TopicFilter = "#", Start = SubscriptionStart.Earliest },
+            new DomainEventSubscriptionOptions { TopicFilter = "#", Start = SubscriptionStart.Earliest },
             (_, _) => ValueTask.FromResult(DeliveryResult.Ack), default).AsTask();
 
         await subscribe.Should().ThrowAsync<NotSupportedException>();
