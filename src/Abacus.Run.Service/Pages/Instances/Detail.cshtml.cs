@@ -14,6 +14,7 @@ public sealed class DetailModel : PageModel
     public WorkflowInstance? Instance { get; private set; }
     public GraphResponse? Graph { get; private set; }
     public Page<EventEnvelope>? Events { get; private set; }
+    public IReadOnlyList<Abacus.Run.Api.SubscriptionDto> Waiting { get; private set; } = [];
     public InstanceActions.AvailableActions Actions { get; private set; } = new();
 
     [BindProperty] public string? Reason { get; set; }
@@ -26,6 +27,7 @@ public sealed class DetailModel : PageModel
         Actions = InstanceActions.For(Instance.Status);
         Graph = await _api.GetGraphAsync(id, ct);
         Events = await _api.GetEventsAsync(id, limit: 200, ct: ct);
+        Waiting = await _api.GetSubscriptionsAsync(id, ct);
     }
 
     public async Task<IActionResult> OnPostCancelAsync(string id, CancellationToken ct)

@@ -1,3 +1,4 @@
+using System.Net.Http.Json;
 using Abacus.Run.Abstractions;
 using Abacus.Run.Api;
 using Abacus.Run.Core;
@@ -151,7 +152,19 @@ public sealed class EventPipelineFixture : WebApplicationFactory<Program>
         Path.Combine(Path.GetTempPath(), $"abacus-events-{Guid.NewGuid():N}.db");
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
-        => builder.UseSetting("Abacus:AuditRecords:ConnectionString", $"Data Source={_auditDatabasePath}");
+    {
+        builder.UseSetting("Abacus:AuditRecords:ConnectionString", $"Data Source={_auditDatabasePath}");
+
+        // The control plane reaches data only through the public API, so its typed client has to be
+        // pointed back at this test server for the pages to render anything.
+        builder.ConfigureServices(services =>
+        {
+            services.AddHttpClient<Abacus.Run.Service.ControlPlane.Services.WorkflowApiClient>(client =>
+            {
+                client.BaseAddress = new Uri("http://localhost");
+            }).ConfigurePrimaryHttpMessageHandler(() => Server.CreateHandler());
+        });
+    }
 
     public T Resolve<T>() where T : notnull => Services.GetRequiredService<T>();
 
@@ -288,6 +301,139 @@ public class EventPipelineTests : IClassFixture<EventPipelineFixture>
 
     private static System.Text.Json.JsonElement Json<T>(T value)
         => System.Text.Json.JsonSerializer.SerializeToElement(value, JsonOptions.Default);
+}
+
+public class EventApiTests : IClassFixture<EventPipelineFixture>
+{
+    private readonly EventPipelineFixture _fixture;
+
+    public EventApiTests(EventPipelineFixture fixture) => _fixture = fixture;
+
+    [Fact]
+    public async Task Publishing_over_http_resumes_a_parked_workflow()
+    {
+        HttpClient client = _fixture.CreateClient();
+        var launcher = _fixture.Resolve<IInstanceLauncher>();
+
+        StartResult started = await launcher.StartAsync(
+            "await-payment", null,
+            new StartInstanceRequest
+            {
+                Context = System.Text.Json.JsonSerializer.SerializeToElement(
+                    new AwaitPaymentContext("ORD-HTTP"), JsonOptions.Default)
+            },
+            "default", null, default);
+
+        await _fixture.WaitForStatusAsync(started.Instance!.InstanceId, InstanceStatus.AwaitingInput);
+
+        HttpResponseMessage response = await client.PostAsJsonAsync("/events", new
+        {
+            topic = "payment.settled",
+            payload = new { orderId = "ORD-HTTP", amount = 42.0 },
+            correlationKey = "ORD-HTTP"
+        });
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.Accepted);
+
+        WorkflowInstance completed = await _fixture.WaitForStatusAsync(
+            started.Instance.InstanceId, InstanceStatus.Completed);
+
+        completed.ResultJson.Should().Contain("42",
+            "an external publisher should be able to resume a workflow it knows nothing about");
+    }
+
+    [Fact]
+    public async Task A_wildcard_topic_is_rejected_on_publish()
+    {
+        HttpClient client = _fixture.CreateClient();
+
+        HttpResponseMessage response = await client.PostAsJsonAsync("/events", new
+        {
+            topic = "payment.*",
+            payload = new { }
+        });
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest,
+            "wildcards belong to subscriber filters, not published topics");
+    }
+
+    [Fact]
+    public async Task Distributed_scope_is_refused_when_no_distributed_broker_is_configured()
+    {
+        HttpClient client = _fixture.CreateClient();
+
+        HttpResponseMessage response = await client.PostAsJsonAsync("/events", new
+        {
+            topic = "payment.settled",
+            payload = new { },
+            scope = "Distributed"
+        });
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest,
+            "accepting it would mean the other service silently never hears about it");
+    }
+
+    [Fact]
+    public async Task Subscriptions_show_what_a_parked_instance_is_waiting_for()
+    {
+        HttpClient client = _fixture.CreateClient();
+        var launcher = _fixture.Resolve<IInstanceLauncher>();
+
+        StartResult started = await launcher.StartAsync(
+            "await-payment", null,
+            new StartInstanceRequest
+            {
+                Context = System.Text.Json.JsonSerializer.SerializeToElement(
+                    new AwaitPaymentContext("ORD-VISIBLE"), JsonOptions.Default)
+            },
+            "default", null, default);
+
+        await _fixture.WaitForStatusAsync(started.Instance!.InstanceId, InstanceStatus.AwaitingInput);
+
+        string body = await client.GetStringAsync(
+            $"/subscriptions?instanceId={started.Instance.InstanceId}&pendingOnly=true");
+
+        body.Should().Contain("payment.settled");
+        body.Should().Contain("ORD-VISIBLE");
+        body.Should().Contain("await-settlement",
+            "an operator must be able to see which node is parked, not just that the instance is");
+    }
+
+    [Fact]
+    public async Task The_instance_page_shows_what_a_parked_instance_is_waiting_on()
+    {
+        HttpClient client = _fixture.CreateClient();
+        var launcher = _fixture.Resolve<IInstanceLauncher>();
+
+        StartResult started = await launcher.StartAsync(
+            "await-payment", null,
+            new StartInstanceRequest
+            {
+                Context = System.Text.Json.JsonSerializer.SerializeToElement(
+                    new AwaitPaymentContext("ORD-UI"), JsonOptions.Default)
+            },
+            "default", null, default);
+
+        await _fixture.WaitForStatusAsync(started.Instance!.InstanceId, InstanceStatus.AwaitingInput);
+
+        string html = await client.GetStringAsync($"/control/Instances/Detail?id={started.Instance.InstanceId}");
+
+        html.Should().Contain("Waiting on");
+        html.Should().Contain("payment.settled");
+        html.Should().Contain("await-settlement",
+            "an operator looking at a parked instance must be told which node is blocked and on what");
+    }
+
+    [Fact]
+    public async Task Triggers_are_listed_so_an_operator_can_see_what_is_wired_up()
+    {
+        HttpClient client = _fixture.CreateClient();
+
+        string body = await client.GetStringAsync("/subscriptions?kind=Trigger");
+
+        body.Should().Contain("orders.placed");
+        body.Should().Contain("ship-order");
+    }
 }
 
 /// <summary>

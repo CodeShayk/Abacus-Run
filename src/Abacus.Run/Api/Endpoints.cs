@@ -41,6 +41,22 @@ public sealed record CancelRequestDto(string? Reason);
 
 public sealed record RerunRequestDto(string? Mode, JsonElement? Context, string? FromCheckpointId, string? Reason);
 
+public sealed record PublishEventRequestDto(
+    string? Topic, JsonElement? Payload, string? CorrelationKey, string? Scope);
+
+public sealed record SubscriptionDto(
+    string SubscriptionId,
+    string Kind,
+    string TopicFilter,
+    string? CorrelationKey,
+    string? TenantId,
+    string? InstanceId,
+    string? ExecutorId,
+    string? WorkflowName,
+    bool Satisfied,
+    DateTimeOffset? ExpiresAt,
+    DateTimeOffset CreatedAt);
+
 public static class Endpoints
 {
     public static IEndpointRouteBuilder MapWorkflowApi(this IEndpointRouteBuilder app)
@@ -501,6 +517,111 @@ public static class Endpoints
                     title: "Approval already decided", detail: result.Detail, statusCode: StatusCodes.Status409Conflict)
             };
         });
+
+        // Publishes a domain message from outside the engine, so an external system can start or
+        // resume a workflow without knowing which one is listening. Scoped Local by default: crossing
+        // the service boundary is something a caller asks for, not something an endpoint decides.
+        app.MapPost("/events", async (
+            PublishEventRequestDto body,
+            HttpContext http,
+            IEventBroker broker,
+            CancellationToken cancellationToken) =>
+        {
+            if (body is null)
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["topic"] = ["A topic is required."]
+                });
+            }
+
+            if (!TopicPattern.IsValidTopic(body.Topic, out string? topicError))
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["topic"] = [topicError!]
+                });
+            }
+
+            if (!Enum.TryParse(body.Scope ?? nameof(DeliveryScope.Local), ignoreCase: true, out DeliveryScope scope))
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]>
+                {
+                    ["scope"] = [$"Must be one of: {nameof(DeliveryScope.Local)}, {nameof(DeliveryScope.Distributed)}."]
+                });
+            }
+
+            if (scope == DeliveryScope.Distributed && !broker.Capabilities.SupportsDistributed)
+            {
+                return Results.Problem(
+                    title: "Distributed delivery is not configured",
+                    detail: "The registered broker delivers within this service only. Publish as Local, " +
+                            "or configure a distributed broker.",
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            // An idempotency key becomes the message id, so a retried publish is the same message
+            // rather than a second one — consumers deduplicate on it.
+            string messageId = http.Request.Headers["Idempotency-Key"].FirstOrDefault() is { Length: > 0 } key
+                ? key
+                : IdGenerator.NewId("msg");
+
+            var message = new BrokerMessage
+            {
+                MessageId = messageId,
+                Topic = body.Topic!,
+                PayloadJson = body.Payload?.GetRawText() ?? "{}",
+                Scope = scope,
+                CorrelationKey = body.CorrelationKey,
+                TenantId = http.TenantId()
+            };
+
+            await broker.PublishAsync(message, cancellationToken).ConfigureAwait(false);
+
+            return Results.Accepted(value: new { messageId = message.MessageId, topic = message.Topic });
+        });
+
+        // What is listening, and what is waiting. An instance parked on an event with no visible
+        // reason is the worst version of this feature.
+        app.MapGet("/subscriptions", async (
+            [FromQuery] string? instanceId,
+            [FromQuery] string? topic,
+            [FromQuery] string? kind,
+            [FromQuery] bool? pendingOnly,
+            [FromQuery] int? limit,
+            HttpContext http,
+            IEventSubscriptionStore subscriptions,
+            CancellationToken cancellationToken) =>
+        {
+            SubscriptionKind? parsedKind = null;
+            if (kind is { Length: > 0 })
+            {
+                if (!Enum.TryParse(kind, ignoreCase: true, out SubscriptionKind value))
+                {
+                    return Results.ValidationProblem(new Dictionary<string, string[]>
+                    {
+                        ["kind"] = [$"Must be one of: {nameof(SubscriptionKind.Trigger)}, {nameof(SubscriptionKind.Wait)}."]
+                    });
+                }
+                parsedKind = value;
+            }
+
+            if (topic is { Length: > 0 } && !TopicPattern.IsValidTopic(topic, out string? topicError))
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["topic"] = [topicError!] });
+            }
+
+            IReadOnlyList<EventSubscription> items = await subscriptions.QueryAsync(new SubscriptionQuery
+            {
+                InstanceId = instanceId,
+                Topic = topic,
+                Kind = parsedKind,
+                PendingOnly = pendingOnly ?? false,
+                Limit = Math.Clamp(limit ?? 50, 1, 200)
+            }, cancellationToken).ConfigureAwait(false);
+
+            return Results.Ok(new { items = items.Select(s => s.ToDto()) });
+        });
     }
 
     /// <summary>
@@ -596,6 +717,15 @@ public static class Endpoints
         approval.ApprovalId, approval.InstanceId, approval.ExecutorId, approval.Reason, approval.State.ToString(),
         approval.Assignees, approval.RequiredApprovers, approval.AllowModification, approval.CreatedAt,
         approval.ExpiresAt, $"/approvals/{approval.ApprovalId}/decision");
+
+    /// <summary>
+    /// The delivered payload is deliberately absent: it is domain data that has already been
+    /// redacted on its way to the event stream, and repeating it unredacted here would undo that.
+    /// </summary>
+    public static SubscriptionDto ToDto(this EventSubscription subscription) => new(
+        subscription.SubscriptionId, subscription.Kind.ToString(), subscription.TopicFilter,
+        subscription.CorrelationKey, subscription.TenantId, subscription.InstanceId, subscription.ExecutorId,
+        subscription.WorkflowName, subscription.IsSatisfied, subscription.ExpiresAt, subscription.CreatedAt);
 
     public static IResult ToHttpResult(this GateConfigResult result) => result.Kind switch
     {

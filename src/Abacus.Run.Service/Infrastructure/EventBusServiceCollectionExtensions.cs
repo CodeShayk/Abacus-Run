@@ -1,3 +1,4 @@
+using Abacus.Run.Abstractions;
 using Abacus.Run.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -40,6 +41,34 @@ public static class EventBusServiceCollectionExtensions
         services.TryAddSingleton(sp => new RedisControlChannel(
             sp.GetRequiredService<IConnectionMultiplexer>(),
             sp.GetService<ILogger<RedisControlChannel>>()));
+
+        return services;
+    }
+
+    /// <summary>
+    /// Replaces the in-process workflow broker with the Redis one, so workflows in separate services
+    /// can publish and subscribe to each other.
+    /// </summary>
+    /// <remarks>
+    /// Only messages published at <see cref="DeliveryScope.Distributed"/> cross the wire; local ones
+    /// keep the in-process path this broker composes. Registering it therefore widens what a
+    /// publisher <em>may</em> do without changing what any existing publisher does.
+    /// </remarks>
+    public static IServiceCollection AddRedisEventBroker(
+        this IServiceCollection services,
+        string connectionString,
+        int maxStreamLength = 100_000)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+
+        services.TryAddSingleton<IConnectionMultiplexer>(_ =>
+            ConnectionMultiplexer.Connect(connectionString));
+
+        services.RemoveAll<IEventBroker>();
+        services.AddSingleton<IEventBroker>(sp => new RedisEventBroker(
+            sp.GetRequiredService<IConnectionMultiplexer>(),
+            maxStreamLength,
+            loggerFactory: sp.GetService<ILoggerFactory>()));
 
         return services;
     }

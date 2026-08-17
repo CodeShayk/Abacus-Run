@@ -54,6 +54,16 @@ body {
 .main-content { flex: 1; padding: 1.5rem 2rem; overflow-x: auto; }
 .page-header h1 { margin: 0 0 1rem; font-size: 1.5rem; }
 
+/* ─── Waiting-on panel ──────────────────────────────────────────────── */
+
+.waiting-panel {
+    margin-bottom: 1.25rem; padding: 1rem;
+    background: var(--color-surface); border-radius: var(--radius);
+    border-left: 3px solid var(--color-primary);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+.waiting-panel h3 { margin: 0 0 0.75rem; font-size: 0.95rem; }
+
 /* ─── Tables ────────────────────────────────────────────────────────── */
 
 .data-table {

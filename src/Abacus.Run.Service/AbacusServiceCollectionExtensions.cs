@@ -18,6 +18,12 @@ public sealed class AbacusServiceOptions
     public bool EnsureDatabaseCreated { get; set; }
 
     public int RedisMaxStreamLength { get; set; } = 10_000;
+
+    /// <summary>
+    /// Approximate retention for the cross-service broker stream. Larger than the per-instance event
+    /// streams because one stream carries every topic for the whole deployment.
+    /// </summary>
+    public int RedisMaxBrokerStreamLength { get; set; } = 100_000;
 }
 
 /// <summary>
@@ -47,7 +53,8 @@ public static class AbacusServiceCollectionExtensions
                 ?? configuration.GetConnectionString("Abacus"),
             RedisConnectionString = configuration["Abacus:Redis:ConnectionString"],
             EnsureDatabaseCreated = configuration.GetValue("Abacus:SqlServer:EnsureDatabaseCreated", false),
-            RedisMaxStreamLength = configuration.GetValue("Abacus:Redis:MaxStreamLength", 10_000)
+            RedisMaxStreamLength = configuration.GetValue("Abacus:Redis:MaxStreamLength", 10_000),
+            RedisMaxBrokerStreamLength = configuration.GetValue("Abacus:Redis:MaxBrokerStreamLength", 100_000)
         };
         configure?.Invoke(options);
 
@@ -69,6 +76,7 @@ public static class AbacusServiceCollectionExtensions
         if (!string.IsNullOrWhiteSpace(options.RedisConnectionString))
         {
             services.AddRedisEventBus(options.RedisConnectionString, options.RedisMaxStreamLength);
+            services.AddRedisEventBroker(options.RedisConnectionString, options.RedisMaxBrokerStreamLength);
         }
 
         return host;
