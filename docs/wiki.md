@@ -12,6 +12,11 @@ This page is the repository-level technical wiki. It documents the implementatio
 - [Project structure](#project-structure)
 - [Getting started](#getting-started)
 - [Authoring a workflow](#authoring-a-workflow)
+  - [What a definition can declare](#what-a-definition-can-declare)
+  - [Nodes](#nodes) · [Built-in executors](#built-in-executors) · [Custom executors](#custom-executors)
+  - [Edges](#edges) · [Approval gates on a node](#approval-gates-on-a-node) · [Events on a node](#events-on-a-node)
+  - [Failure classification](#failure-classification) · [Engine context](#engine-context-inside-an-executor) · [Middleware](#middleware)
+  - [A definition using all of it](#a-definition-using-all-of-it) · [Versioning rules](#versioning-rules-that-bite)
 - [Workflow audit records](#workflow-audit-records)
 - [Registering workflows and middleware](#registering-workflows-and-middleware)
 - [Instance lifecycle](#instance-lifecycle)
@@ -30,6 +35,7 @@ This page is the repository-level technical wiki. It documents the implementatio
 - [Extension points](#extension-points)
 - [Design constraints](#design-constraints)
 - [Troubleshooting](#troubleshooting)
+- [Appendix: authoring variations](#appendix-authoring-variations)
 - [Related documents](#related-documents)
 
 ## At a glance
@@ -282,17 +288,110 @@ public sealed class GreetingWorkflow : IWorkflowDefinition<GreetingContext, Gree
 }
 ```
 
-The exact graph construction methods depend on the Agent Framework graph shape. Common operations include adding edges, fan-out/fan-in barriers, conditions, and workflow output bindings.
+### What a definition can declare
 
-### Host executors
+`IWorkflowDefinition<TContext, TResult>` is the only required interface. Everything else is opt-in,
+so a workflow pays for nothing it does not ask for.
 
-Host executors derive from `HostExecutor<TIn, TOut>`. They implement `ExecuteCoreAsync`; the sealed `HandleAsync` method owns gate evaluation and the executor middleware pipeline.
+| Interface | Declares | Section |
+| --- | --- | --- |
+| `IWorkflowDefinition<TContext, TResult>` | Name, version, context/result types, the graph | this section |
+| `IAuditedWorkflowDefinition` | The shape of the workflow's own audit record | [Audit records](#workflow-audit-records) |
+| `IEventTriggeredWorkflow` | Topics that start an instance of this workflow | [Event broker](#event-broker-and-event-driven-workflows) |
+| `INotifyingWorkflow` | Emission level, per-node overrides, SSE on/off, custom event names | [Events](#events-history-and-sse) |
+
+Approval gates are not an interface — they are declared per node, inline in `BuildAsync`.
+
+`WorkflowBuildContext` is what `BuildAsync` receives, and carries the run's identity as well as the
+attachment methods:
+
+| Member | Purpose |
+| --- | --- |
+| `InstanceId`, `TenantId` | This run's identity — useful for closures the executors capture |
+| `WorkflowName`, `WorkflowVersion` | What the registry resolved |
+| `Attempt` | 1 on the first run, higher after a retry |
+| `Services` | The host's `IServiceProvider`; resolve brokers, clients, stores from it |
+| `Audit` | The recorder, when the definition declares an audit record |
+| `Node(executor, gate?)` | Attach a host executor, optionally gated |
+| `RawNode(binding)` | Attach a raw framework or agent binding |
+| `Gates`, `Nodes` | What this build declared; read by the runtime and the catalog API |
+
+`BuildAsync` is called **once per run attempt**, not once at startup, so it is free to resolve
+per-instance services or vary the graph by context. Keep it cheap and deterministic: the same
+instance rebuilding a different graph on resume will not match its own checkpoint.
+
+### Nodes
+
+`WorkflowBuildContext.Node(...)` attaches a host executor: it wires the middleware pipeline, the
+approval gate, the audit recorder and the per-instance runtime, and returns the `ExecutorBinding` the
+graph is built from.
 
 ```csharp
-public sealed class GreetingExecutor : HostExecutor<GreetingContext, GreetingResult>
-{
-    public GreetingExecutor(string id) : base(id) { }
+ExecutorBinding validate = context.Node(new Validate("validate"));
+```
 
+The **executor id** is the identity everything else hangs off: gate policies are keyed by it, node
+state is projected by it, per-node notification overrides name it, and the graph endpoint reports it.
+Renaming a node in a published version silently orphans any tenant policy written against the old id
+— change the workflow version instead.
+
+`RawNode(...)` is the escape hatch for bindings the host did not create. Raw nodes participate in the
+graph but run outside the executor middleware pipeline and **cannot be approval-gated** — passing a
+gate block to `RawNode` throws rather than silently ignoring it, because a gate that quietly did
+nothing would be worse than one that was refused.
+
+The framework supplies several ways to make a binding, and `ExecutorBinding` has implicit conversions
+from `Executor`, `AIAgent`, `RequestPort` and `string`:
+
+| Binding | From |
+| --- | --- |
+| `executor.BindExecutor()` | A raw framework `Executor` |
+| `agent.BindAsExecutor(id)` | An `AIAgent` — the agent becomes a node |
+| `workflow.BindAsExecutor(id)` | Another `Workflow`, as a **sub-workflow** node |
+| `handler.BindAsExecutor<TIn>(id)` | A bare `Func<TIn, IWorkflowContext, CancellationToken, ValueTask>` |
+
+Prefer `Node(...)` with a `HostExecutor<TIn, TOut>` whenever middleware, gates, audit or notifications
+are wanted — a raw node gets none of them.
+
+### Built-in executors
+
+| Executor | Shape | Purpose |
+| --- | --- | --- |
+| `TransformExecutor<TIn, TOut>` | `(id, Func<TIn, TOut>)` | Pure mapping |
+| `DelegateExecutor<TIn, TOut>` | `(id, handler)` | General-purpose async work |
+| `ApiCallExecutor` | `(id, ApiCallOptions, clientFactory)` | Templated HTTP call with egress control and idempotency key |
+| `LlmExecutor` | `(id, LlmOptions, clientResolver, pricing?)` | Chat model call with structured output, streaming and cost |
+| `DelayExecutor` | `(id, TimeSpan, ITimerService)` | Durable delay — checkpoints and halts rather than blocking |
+| `HumanApprovalExecutor<T>` | `(id)` | Approval as an explicit node rather than node configuration |
+| `FanInExecutor<TItem, TOut>` | `(id, aggregate)` | Aggregates a fan-in barrier's inputs |
+| `PublishEventExecutor<T>` | `(id, broker, topic, …)` | Publishes a domain message, passing input through |
+| `WaitForEventExecutor<TIn, TPayload>` | `(id, subscriptions, topicFilter, …)` | Parks until a matching message arrives |
+
+Three of them behave in ways worth knowing before you reach for them:
+
+- **`DelayExecutor` does not sleep.** It writes a timer row, checkpoints and halts, so the instance
+  releases its lease. A 24-hour delay costs no execution capacity, and survives a restart. It needs
+  an `ITimerService` from `context.Services`.
+- **`PublishEventExecutor<T>` passes its input through unchanged.** Publishing is a side effect on
+  the way past, so the node drops into an existing edge without rewiring the graph around it.
+- **`WaitForEventExecutor` runs twice.** The first pass registers a durable subscription and parks;
+  after delivery the runner resumes from the checkpoint, the executor runs again, finds its payload
+  and returns it. Anything it does before parking therefore happens twice — keep it to registering
+  the wait.
+
+`ApiCallExecutor` and `LlmExecutor` bind their templates through the shared `TemplateEngine`, so
+`{{ context.Field }}` resolves against the message the node received. `ApiCallExecutor` enforces the
+egress allow-list, attaches an `Idempotency-Key`, and surfaces a non-success status as a typed
+`ApiCallFailureException` rather than a generic HTTP error.
+
+### Custom executors
+
+Derive from `HostExecutor<TIn, TOut>` and implement `ExecuteCoreAsync`. `HandleAsync` is sealed
+because gate evaluation and the middleware pipeline live there and must not be overridden away.
+
+```csharp
+public sealed class GreetingExecutor(string id) : HostExecutor<GreetingContext, GreetingResult>(id)
+{
     protected override ValueTask<GreetingResult> ExecuteCoreAsync(
         GreetingContext input,
         IWorkflowContext context,
@@ -301,11 +400,260 @@ public sealed class GreetingExecutor : HostExecutor<GreetingContext, GreetingRes
 }
 ```
 
-The output type must be a reference type because a gated executor returns `null` while it parks the workflow.
+`TOut` is constrained to a reference type because the pause path returns `null` and the engine only
+auto-sends non-null handler results — that is exactly what lets a gated or waiting executor park
+without emitting a bogus message downstream.
 
-### Raw framework nodes
+Inside an executor, `Runtime` carries the per-instance context: `Runtime.InstanceId`,
+`Runtime.TenantId`, `Runtime.Attempt`, `Runtime.CurrentSuperstep`, and the nullable hooks
+`Runtime.Audit`, `Runtime.Notify` and `Runtime.Services`. Override `Metadata` to describe the node
+for the graph endpoint.
 
-`WorkflowBuildContext.RawNode(...)` is an escape hatch for raw framework executor bindings and agent bindings. Raw nodes participate in the graph but do not receive host executor middleware and cannot be approval-gated. Use `Node(...)` with a `HostExecutor<TIn, TOut>` when middleware or approvals are required.
+### Edges
+
+Edges come from the Agent Framework's `WorkflowBuilder`. The constructor takes the start node, and
+`WithOutputFrom` names the node whose result becomes the workflow's result.
+
+```csharp
+Workflow workflow = new WorkflowBuilder(validate)
+    .AddEdge(validate, enrich)                      // sequential
+    .AddEdge<Order>(enrich, escalate,               // conditional: only when the predicate holds
+        condition: order => order is { Amount: > 10_000m })
+    .AddEdge<Order>(enrich, settle,
+        condition: order => order is { Amount: <= 10_000m })
+    .AddFanOutEdge(settle, [notifyOps, notifyCustomer])          // both targets
+    .AddFanInBarrierEdge([notifyOps, notifyCustomer], complete)  // waits for every source
+    .WithOutputFrom(complete)
+    .WithName(Name)
+    .Build();
+```
+
+| Method | Behaviour |
+| --- | --- |
+| `AddEdge(source, target)` | Unconditional |
+| `AddEdge<T>(source, target, condition)` | Traversed only when the predicate holds for the message |
+| `AddEdge(source, target, label, idempotent)` | Labelled for the graph view; `idempotent` permits re-adding the same edge |
+| `AddFanOutEdge(source, targets)` | Sends to every target |
+| `AddFanOutEdge<T>(source, targets, targetSelector)` | Sends to the subset the selector picks by index |
+| `AddFanInBarrierEdge(sources, target)` | Target runs once every source has delivered |
+| `WithOutputFrom(executor, …)` | Binds the workflow result; accepts several nodes |
+| `Build(validateOrphans: true)` | Throws on a node no edge reaches — a typo, not a design |
+
+Two conditional edges out of one node is how a branch is expressed; there is no separate switch
+construct. Make the predicates exhaustive, or a message matching neither simply stops there and the
+run completes with no output.
+
+`FanInExecutor<TItem, TOut>` is the natural target of `AddFanInBarrierEdge`, since the barrier
+delivers a list.
+
+### Approval gates on a node
+
+A node attached with no gate block runs autonomously. Pass one to require a human decision:
+
+```csharp
+ExecutorBinding settle = context.Node(new Settle("settle"), gate => gate
+    .Mode(ExecutionMode.RequireApproval)
+    .When<Order>(order => order.Amount > 25_000m)   // Conditional mode
+    .Reason("RegulatedSettlement")
+    .AssignTo("group:finance", "user:cfo")
+    .RequireApprovers(2)
+    .ExpiresAfter(TimeSpan.FromHours(8))
+    .OnExpiry(ExpiryAction.Escalate, "group:exec")
+    .AllowModification()
+    .RequireSegregationOfDuties()
+    .Locked());                                     // tenants may tighten, never weaken
+```
+
+Every gated node is reconfigurable per tenant at run time unless the author calls `.Locked()`. See
+[Human approval gates](#human-approval-gates) for the decision flow and
+[Tenant executor configuration](#tenant-executor-configuration) for precedence.
+
+### Events on a node
+
+Publishing and waiting are ordinary nodes; notifying is a call inside one. Resolve the broker and
+subscription store from `context.Services`:
+
+```csharp
+var broker = context.Services!.GetRequiredService<IEventBroker>();
+var subscriptions = context.Services!.GetRequiredService<IEventSubscriptionStore>();
+
+ExecutorBinding publish = context.Node(new PublishEventExecutor<OrderPlaced>(
+    "publish-order-placed", broker, topic: "orders.placed", correlationKey: o => o.OrderId));
+
+ExecutorBinding wait = context.Node(new WaitForEventExecutor<Order, PaymentSettled>(
+    "await-settlement", subscriptions, "payment.settled",
+    correlationKey: o => o.OrderId, timeout: TimeSpan.FromDays(3)));
+```
+
+See [Events](#events-history-and-sse) and
+[Event broker](#event-broker-and-event-driven-workflows).
+
+### Failure classification
+
+`Classify` decides what a thrown exception means for the instance.
+
+| Disposition | Effect |
+| --- | --- |
+| `Retry` | Backoff and try again, until `MaxAttempts` or `MaxLifetimeHours` |
+| `DeadStop` | Terminal. Retrying cannot help, so do not burn attempts discovering that |
+| `Escalate` | Terminal, and flagged for operator attention |
+
+`WorkflowFailure` carries `ExecutorId`, `Exception`, `AttemptCount`, `Superstep` and the executor's
+`Metadata`, so a classifier can decide differently per node without inspecting message text.
+
+The default classifier already handles the common cases — rate limits, overload and 5xx retry;
+validation, structured-output and 4xx dead-stop — so a definition overrides it only where its own
+domain disagrees, and delegates the rest:
+
+```csharp
+public FailureDisposition Classify(WorkflowFailure failure) => failure.Exception switch
+{
+    InsufficientFundsException  => FailureDisposition.DeadStop,   // retrying cannot help
+    ReconciliationBreakException => FailureDisposition.Escalate,  // a human must look
+    _ => DefaultFailureClassifier.Instance.Classify(failure)
+};
+```
+
+Framework exceptions a classifier can match on: `WorkflowDeadStopException`,
+`ApprovalRejectedException`, `WorkflowValidationException`, `StructuredOutputException`,
+`ApiCallFailureException` (carries `StatusCode`, body excerpt and `Retry-After`),
+`LlmRateLimitException`, `LlmOverloadedException`.
+
+Throwing `WorkflowDeadStopException` from inside an executor is the direct way to say "this run is
+over" without routing it through the classifier.
+
+See [Retries and failure classification](#retries-and-failure-classification).
+
+### Engine context inside an executor
+
+`ExecuteCoreAsync` receives the Agent Framework's `IWorkflowContext`, which is separate from
+`Runtime`: `Runtime` is what the host adds, `IWorkflowContext` is what the engine offers.
+
+| Member | Purpose |
+| --- | --- |
+| `QueueStateUpdateAsync(key, value)` | Writes state that survives into the next checkpoint |
+| `ReadStateAsync<T>(key)` / `ReadOrInitStateAsync<T>` | Reads it back after a resume |
+| `RequestHaltAsync()` | Parks the run — the mechanism behind gates and event waits |
+| `YieldOutputAsync(output)` | Emits a workflow output without being the terminal node |
+| `SendMessageAsync(message, targetId)` | Sends to a specific node, bypassing edge routing |
+| `AddEventAsync(workflowEvent)` | Raises an engine event, ordered with executor events |
+
+Use `QueueStateUpdateAsync` rather than executor fields for anything that must survive a restart: an
+executor instance is rebuilt on resume, and a field is gone with it.
+
+### Middleware
+
+Two seams, both registered at composition rather than declared by a workflow. Lower `Order` runs
+earlier in the outer pipeline.
+
+```csharp
+public sealed class TimingMiddleware : IExecutorMiddleware
+{
+    public int Order => 10;
+
+    // Narrow the scope; the default applies it to every node.
+    public bool AppliesTo(ExecutorDescriptor descriptor) => descriptor.ExecutorId != "noisy";
+
+    public async ValueTask InvokeAsync(
+        ExecutorInvocationContext context, ExecutorDelegate next, CancellationToken ct)
+    {
+        long start = Stopwatch.GetTimestamp();
+        await next(context, ct);
+        // context.Output, context.Exception and context.Succeeded are all readable here.
+        Record(context.Descriptor.ExecutorId, Stopwatch.GetElapsedTime(start), context.Succeeded);
+    }
+}
+```
+
+`IWorkflowMiddleware` wraps a whole run and sees `WorkflowInvocationContext` instead.
+`ExecutorInvocationContext.Exception` is settable, so middleware can observe, replace or swallow a
+failure as the pipeline unwinds — which is how retry-shaping and drift detection work without the
+workflow knowing.
+
+Built-in middleware comes from `AddBuiltInMiddleware()`: OpenTelemetry spans for runs and executors,
+request/response logging, and LLM drift. See
+[Registering workflows and middleware](#registering-workflows-and-middleware).
+
+### A definition using all of it
+
+```csharp
+public sealed class OrderWorkflow
+    : IWorkflowDefinition<OrderContext, OrderResult>,
+      IAuditedWorkflowDefinition,
+      IEventTriggeredWorkflow,
+      INotifyingWorkflow
+{
+    public string Name => "order";
+    public string Version => "1.2.0";
+
+    // Started by a domain message as well as by POST /workflows/order/instances.
+    public IReadOnlyList<EventTrigger> Triggers =>
+        [new EventTrigger { TopicFilter = "orders.placed" }];
+
+    // Quiet by default; the interesting node stays loud. Streaming stays on.
+    public NotificationPolicy Notifications { get; } = new()
+    {
+        Level = NotificationLevel.Lifecycle,
+        ByNode = new Dictionary<string, NotificationLevel>(StringComparer.Ordinal)
+        {
+            ["settle"] = NotificationLevel.Standard
+        },
+        Emits = ["order.repriced"]
+    };
+
+    public AuditRecordDefinition AuditRecord { get; } = new(
+        "order", "One order, as processed.",
+        [
+            new AuditSectionDefinition("submission", "What was submitted.", Multiple: false),
+            new AuditSectionDefinition("step", "One processing step."),
+            new AuditSectionDefinition("outcome", "How the run settled.", Multiple: false)
+        ]);
+
+    public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken ct)
+    {
+        var subscriptions = context.Services!.GetRequiredService<IEventSubscriptionStore>();
+
+        ExecutorBinding validate = context.Node(new Validate("validate"));
+
+        ExecutorBinding settle = context.Node(new Settle("settle"), gate => gate
+            .When<OrderContext>(order => order.Amount > 25_000m)
+            .Reason("AmountAboveThreshold")
+            .AssignTo("group:finance")
+            .RequireApprovers(2)
+            .Locked());
+
+        ExecutorBinding awaitPayment = context.Node(
+            new WaitForEventExecutor<OrderContext, PaymentSettled>(
+                "await-settlement", subscriptions, "payment.settled",
+                correlationKey: o => o.OrderId, timeout: TimeSpan.FromDays(3)));
+
+        ExecutorBinding complete = context.Node(new Complete("complete"));
+
+        return new ValueTask<Workflow>(new WorkflowBuilder(validate)
+            .AddEdge(validate, settle)
+            .AddEdge(settle, awaitPayment)
+            .AddEdge(awaitPayment, complete)
+            .WithOutputFrom(complete)
+            .WithName(Name)
+            .Build());
+    }
+
+    public FailureDisposition Classify(WorkflowFailure failure)
+        => DefaultFailureClassifier.Instance.Classify(failure);
+}
+```
+
+### Versioning rules that bite
+
+- **Executor ids are the key for tenant gate policies**, and policies are stored per workflow
+  *version*. A tenant's configuration does not carry forward to a new version, so a version bump
+  starts from the author's declared gates again.
+- **An in-flight instance keeps the version it started on.** The registry resolves by the instance's
+  recorded version, so redeploying a new version never changes the shape of a run already underway.
+- **`POST /instances/{id}/rerun` in restart mode creates the new instance at the *current* version**,
+  which is the one case where a rerun can behave differently from the original.
+- Two definitions registered with the same name and version fail startup rather than one silently
+  winning.
 
 ## Workflow audit records
 
@@ -1566,6 +1914,375 @@ storage problem surfaces, not the response.
 ### An outbound call is blocked
 
 Check the URL scheme, whether the target resolves to an internal address, and whether the hostname matches `WorkflowHost:Egress:AllowedHosts`. Keep `Egress:Enforce=true` unless this is a controlled local test.
+
+## Appendix: authoring variations
+
+Each recipe is a complete `BuildAsync` (or the declaration that matters), showing one shape in
+isolation. They compose — the [worked definition](#a-definition-using-all-of-it) above combines
+several.
+
+### A.1 Linear
+
+The default shape. One node after another, output from the last.
+
+```csharp
+public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken ct)
+{
+    ExecutorBinding validate = context.Node(new Validate("validate"));
+    ExecutorBinding enrich   = context.Node(new Enrich("enrich"));
+    ExecutorBinding submit   = context.Node(new Submit("submit"));
+
+    return new ValueTask<Workflow>(new WorkflowBuilder(validate)
+        .AddEdge(validate, enrich)
+        .AddEdge(enrich, submit)
+        .WithOutputFrom(submit)
+        .WithName(Name)
+        .Build());
+}
+```
+
+### A.2 Branch
+
+Two conditional edges out of one node. There is no switch construct; this is the branch.
+
+```csharp
+ExecutorBinding triage = context.Node(new Triage("triage"));
+ExecutorBinding fast   = context.Node(new FastPath("fast-path"));
+ExecutorBinding manual = context.Node(new ManualPath("manual-path"));
+
+return new ValueTask<Workflow>(new WorkflowBuilder(triage)
+    .AddEdge<Order>(triage, fast,   condition: o => o is { Amount: <= 10_000m })
+    .AddEdge<Order>(triage, manual, condition: o => o is { Amount: >  10_000m })
+    .WithOutputFrom(fast, manual)          // whichever branch ran supplies the result
+    .WithName(Name)
+    .Build());
+```
+
+The condition's parameter is `T?`, so a pattern (`o is { … }`) reads better than a null-forgiving
+dereference and handles the null case explicitly.
+
+Make the predicates exhaustive. A message matching neither edge stops there, and the run completes
+with no output rather than failing — which looks like success and is the hardest branch bug to spot.
+
+### A.3 Fan-out and fan-in
+
+```csharp
+ExecutorBinding split   = context.Node(new Split("split"));
+ExecutorBinding credit  = context.Node(new CheckCredit("check-credit"));
+ExecutorBinding stock   = context.Node(new CheckStock("check-stock"));
+ExecutorBinding fraud   = context.Node(new CheckFraud("check-fraud"));
+ExecutorBinding decide  = context.Node(new FanInExecutor<CheckResult, Decision>(
+    "decide", checks => new Decision(checks.All(c => c.Passed))));
+
+return new ValueTask<Workflow>(new WorkflowBuilder(split)
+    .AddFanOutEdge(split, [credit, stock, fraud])
+    .AddFanInBarrierEdge([credit, stock, fraud], decide)   // waits for all three
+    .WithOutputFrom(decide)
+    .WithName(Name)
+    .Build());
+```
+
+Selective fan-out picks targets by index instead of sending to all:
+
+```csharp
+.AddFanOutEdge<Order>(split, [credit, stock, fraud],
+    targetSelector: (order, count) => order!.SkipFraudCheck ? [0, 1] : [0, 1, 2])
+```
+
+A wide fan-out is the usual reason to set `NotificationLevel.Lifecycle` — see [A.10](#a10-quiet-a-chatty-workflow).
+
+### A.4 Approval gates
+
+Three ways to gate, from blunt to conditional:
+
+```csharp
+// Always requires a decision.
+context.Node(new Publish("publish"), gate => gate
+    .Mode(ExecutionMode.RequireApproval)
+    .AssignTo("group:ops")
+    .ExpiresAfter(TimeSpan.FromHours(4)));
+
+// Only above a threshold. `When` implies Conditional mode.
+context.Node(new Settle("settle"), gate => gate
+    .When<Order>(order => order.Amount > 25_000m)
+    .Reason("AmountAboveThreshold")
+    .RequireApprovers(2)
+    .AllowModification());
+
+// A floor a tenant may tighten but never weaken.
+context.Node(new Payout("payout"), gate => gate
+    .Mode(ExecutionMode.RequireApproval)
+    .AssignTo("group:finance")
+    .RequireSegregationOfDuties()
+    .OnExpiry(ExpiryAction.DeadStop)
+    .Locked());
+```
+
+`HumanApprovalExecutor<T>` does the same job as a node rather than as configuration, when the
+approval is part of the workflow's own logic and should be visible in the graph:
+
+```csharp
+ExecutorBinding signOff = context.Node(new HumanApprovalExecutor<Order>("sign-off"));
+```
+
+### A.5 Durable delay
+
+`DelayExecutor` checkpoints and halts rather than blocking a thread or holding a lease, so a long
+delay costs no execution capacity.
+
+```csharp
+var timers = context.Services!.GetRequiredService<ITimerService>();
+
+ExecutorBinding cooloff = context.Node(
+    new DelayExecutor("cool-off", TimeSpan.FromHours(24), timers));
+
+return new ValueTask<Workflow>(new WorkflowBuilder(submit)
+    .AddEdge(submit, cooloff)
+    .AddEdge(cooloff, settle)
+    .WithOutputFrom(settle)
+    .Build());
+```
+
+### A.6 HTTP call
+
+```csharp
+ExecutorBinding fetch = context.Node(new ApiCallExecutor("fetch-invoice",
+    new ApiCallOptions
+    {
+        Method = HttpMethod.Get,
+        UrlTemplate = "https://erp.internal/invoices/{{ context.InvoiceId }}",
+        Headers = { ["Accept"] = "application/json" },
+        TimeoutSeconds = 15,
+        SuccessCodes = [200, 204],
+        ResponseAs = typeof(InvoiceDto),
+        AllowedHosts = ["erp.internal"],
+        EnforceEgress = true,        // refuse anything not on the allow-list
+        SendIdempotencyKey = true    // safe to retry
+    },
+    () => context.Services!.GetRequiredService<IHttpClientFactory>()
+        .CreateClient(ApiCallOptions.HttpClientName)));
+```
+
+A non-success status arrives as a typed `ApiCallFailure` carrying status, body excerpt and
+`Retry-After`, so [`Classify`](#a12-custom-failure-classification) can act on it rather than parsing
+a message.
+
+### A.7 LLM node
+
+```csharp
+ExecutorBinding classify = context.Node(new LlmExecutor("classify",
+    new LlmOptions
+    {
+        Model = "claude-sonnet-5",
+        SystemPrompt = "Classify the invoice.",
+        PromptVersion = "v3",                 // tags the drift baseline
+        UserTemplate = "{{ context.DocumentText }}",
+        StructuredOutput = typeof(Classification),
+        Temperature = 0.0f,
+        MaxTokens = 2048,
+        StreamDeltas = true,                  // llm.delta frames, live only
+        EmitCompletion = true                 // one llm.completed per call (default)
+    },
+    model => context.Services!.GetRequiredService<IChatClient>(),
+    context.Services!.GetService<IModelPricing>()));   // enables costUsd and cost drift
+```
+
+Pass the pricing service or `costUsd` is `null` — absent, not zero. See
+[LLM telemetry](#llm-telemetry).
+
+### A.8 Started by an event
+
+```csharp
+public sealed class ShipOrderWorkflow
+    : IWorkflowDefinition<OrderPlaced, ShipmentResult>, IEventTriggeredWorkflow
+{
+    public string Name => "ship-order";
+    public string Version => "1.0.0";
+
+    public IReadOnlyList<EventTrigger> Triggers =>
+    [
+        new EventTrigger { TopicFilter = "orders.placed" },
+        new EventTrigger
+        {
+            TopicFilter = "orders.*.expedited",
+            ContextSelector = m => m.PayloadJson      // remap if the payload is not the context
+        }
+    ];
+
+    // BuildAsync as usual; the message payload arrives as the context.
+}
+```
+
+The message payload becomes the instance context, and its correlation key becomes the instance's
+correlation id. Redelivery is absorbed by the launcher's idempotency key, so a message cannot start
+the same workflow twice.
+
+### A.9 Publish and wait
+
+A two-workflow pipeline. The first publishes; the second parks until the reply arrives.
+
+```csharp
+// Producer — publishing is a side effect on the way past, so the node drops into an existing edge.
+var broker = context.Services!.GetRequiredService<IEventBroker>();
+
+ExecutorBinding publish = context.Node(new PublishEventExecutor<OrderPlaced>(
+    "publish-order-placed", broker,
+    topic: "orders.placed",
+    correlationKey: o => o.OrderId));
+
+// Consumer — parks, releases its lease, and resumes with the payload.
+var subscriptions = context.Services!.GetRequiredService<IEventSubscriptionStore>();
+
+ExecutorBinding awaitPayment = context.Node(
+    new WaitForEventExecutor<OrderContext, PaymentSettled>(
+        "await-settlement", subscriptions,
+        topicFilter: "payment.settled",
+        correlationKey: o => o.OrderId,
+        timeout: TimeSpan.FromDays(3),
+        onExpiry: WaitExpiryAction.DeadStop));   // or Resume, to take a timeout branch
+```
+
+Publishing across a service boundary is a scope on the message, not a different call — see
+[Local by default, global by declaration](#local-by-default-global-by-declaration).
+
+### A.10 Quiet a chatty workflow
+
+```csharp
+public NotificationPolicy Notifications { get; } = new()
+{
+    Level = NotificationLevel.Lifecycle,          // supersteps, no per-node chatter
+    ByNode = new Dictionary<string, NotificationLevel>(StringComparer.Ordinal)
+    {
+        ["reconcile"] = NotificationLevel.Standard  // except this one
+    }
+};
+```
+
+### A.11 Log without streaming
+
+```csharp
+public NotificationPolicy Notifications { get; } = new()
+{
+    StreamEvents = false        // full event log; no SSE
+};
+```
+
+The log is unconditional either way. `GET /instances/{id}/events` then returns `409` naming
+`GET /v2/workflows/{name}/instances/{id}/events`. See
+[Turning SSE off for a workflow](#turning-sse-off-for-a-workflow).
+
+### A.12 Custom notifications from a node
+
+```csharp
+public NotificationPolicy Notifications { get; } = new()
+{
+    Emits = ["documents.scanned"]     // advertised on GET /workflows/{name}
+};
+```
+
+```csharp
+protected override async ValueTask<ScanResult> ExecuteCoreAsync(
+    ScanContext input, IWorkflowContext context, CancellationToken ct)
+{
+    if (Runtime.Notify is { } notify)
+    {
+        await notify.NotifyAsync("documents.scanned", new { count = input.Documents.Count }, ct);
+    }
+    // → event: custom.documents.scanned
+}
+```
+
+### A.13 Audit record
+
+```csharp
+public AuditRecordDefinition AuditRecord { get; } = new(
+    "order", "One order, as processed.",
+    [
+        new AuditSectionDefinition("submission", "What was submitted.", Multiple: false),
+        new AuditSectionDefinition("step", "One processing step."),
+        new AuditSectionDefinition("outcome", "How the run settled.", Multiple: false)
+    ]);
+```
+
+```csharp
+if (Runtime.Audit is { } audit)
+{
+    await audit.OpenAsync(input.OrderId, attributes: null, ct);
+    await audit.RecordAsync("step", key: input.LineId, new { accepted = true }, ct);
+    await audit.CloseAsync(AuditRecordStatus.Completed, ct);
+}
+```
+
+Keying an entry means a retried executor corrects its record rather than doubling it. See
+[Workflow audit records](#workflow-audit-records).
+
+### A.14 Custom failure classification
+
+```csharp
+public FailureDisposition Classify(WorkflowFailure failure) => failure.Exception switch
+{
+    InsufficientFundsException  => FailureDisposition.DeadStop,   // retrying cannot help
+    ThirdPartyThrottleException => FailureDisposition.Retry,
+    ReconciliationBreakException => FailureDisposition.Escalate,  // terminal, flag for an operator
+    _ => DefaultFailureClassifier.Instance.Classify(failure)
+};
+```
+
+Classify per node when the same exception means different things in different places — the failure
+carries `ExecutorId` and the executor's `Metadata`:
+
+```csharp
+public FailureDisposition Classify(WorkflowFailure failure)
+    => failure is { ExecutorId: "optional-enrichment", Exception: HttpRequestException }
+        ? FailureDisposition.DeadStop        // this node is best-effort; do not burn attempts
+        : DefaultFailureClassifier.Instance.Classify(failure);
+```
+
+### A.15 Raw nodes, agents and sub-workflows
+
+Raw nodes join the graph but run outside the executor middleware pipeline and cannot be
+approval-gated — passing a gate block throws.
+
+```csharp
+// An AIAgent as a node.
+ExecutorBinding triage = context.RawNode(someAgent.BindAsExecutor("triage-agent"));
+
+// Another workflow as a node.
+Workflow enrichment = BuildEnrichmentGraph();
+ExecutorBinding enrich = context.RawNode(enrichment.BindAsExecutor("enrich"));
+
+// A bare handler, with no executor class at all.
+Func<Order, IWorkflowContext, CancellationToken, ValueTask> logHandler =
+    (order, _, _) => { Log(order); return ValueTask.CompletedTask; };
+ExecutorBinding log = context.RawNode(logHandler.BindAsExecutor<Order>("log"));
+
+ExecutorBinding record = context.Node(new Record("record"));   // gated, audited, with middleware
+
+return new ValueTask<Workflow>(new WorkflowBuilder(triage)
+    .AddEdge(triage, enrich)
+    .AddEdge(enrich, log)
+    .AddEdge(log, record)
+    .WithOutputFrom(record)
+    .Build());
+```
+
+A sub-workflow node runs the child graph inline. It is not a child *instance* — there is no separate
+instance row, lease or event stream for it, and its nodes are not separately gateable or
+configurable. Use `SubWorkflow` for composition of graph shape; use an event trigger
+([A.8](#a8-started-by-an-event)) when you want a genuinely independent run.
+
+### A.16 Registering what you built
+
+```csharp
+builder.Services
+    .AddAbacus(builder.Configuration)          // or AddWorkflowHost + AddBuiltInMiddleware + AddBackgroundServices
+    .AddWorkflow<OrderWorkflow>()              // resolved from DI
+    .AddWorkflow(new ShipOrderWorkflow())      // or supplied directly
+    .AddExecutorMiddleware<TimingMiddleware>();
+```
+
+Without `AddBackgroundServices()` instances are created and stay `Pending` — nothing executes them.
+See [Registering workflows and middleware](#registering-workflows-and-middleware).
 
 ## Related documents
 
