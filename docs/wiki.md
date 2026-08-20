@@ -11,15 +11,17 @@ This page is the repository-level technical wiki. It documents the implementatio
 - [Architecture](#architecture)
 - [Project structure](#project-structure)
 - [Getting started](#getting-started)
-- [Authoring a workflow](#authoring-a-workflow)
+- [Authoring a workflow](#authoring-a-workflow) — **[two ways in](#two-ways-to-author-a-workflow)**
   - [What a definition can declare](#what-a-definition-can-declare)
   - [Nodes](#nodes) · [Built-in executors](#built-in-executors) · [Custom executors](#custom-executors)
   - [Edges](#edges) · [Approval gates on a node](#approval-gates-on-a-node) · [Events on a node](#events-on-a-node)
   - [Failure classification](#failure-classification) · [Engine context](#engine-context-inside-an-executor) · [Middleware](#middleware)
   - [A definition using all of it](#a-definition-using-all-of-it) · [Versioning rules](#versioning-rules-that-bite)
+  - **[Full C# authoring guide](workflow-authoring-guide.md)**
 - [Authoring with the DSL](#authoring-with-the-dsl)
   - [Which one to reach for](#which-one-to-reach-for) · [The envelope](#the-envelope) · [AbEx](#abex-the-expression-language)
   - [Node kinds](#node-kinds) · [Custom nodes](#custom-nodes--the-extension-seam) · [Validation](#validation)
+  - **[Full DSL authoring guide](dsl-authoring-guide.md)**
 - [Workflow audit records](#workflow-audit-records)
 - [Registering workflows and middleware](#registering-workflows-and-middleware)
 - [Instance lifecycle](#instance-lifecycle)
@@ -38,7 +40,7 @@ This page is the repository-level technical wiki. It documents the implementatio
 - [Extension points](#extension-points)
 - [Design constraints](#design-constraints)
 - [Troubleshooting](#troubleshooting)
-- [Appendix: authoring variations](#appendix-authoring-variations)
+- [Appendix: authoring variations](#appendix-authoring-variations) — moved to the two guides
 - [Related documents](#related-documents)
 
 ## At a glance
@@ -255,6 +257,38 @@ curl http://localhost:5000/health/ready
 The actual port can be changed with standard ASP.NET Core configuration, for example `ASPNETCORE_HTTP_PORTS=8080`.
 
 ## Authoring a workflow
+
+### Two ways to author a workflow
+
+A workflow reaches this runtime through one of two front ends. **Both produce an
+`IWorkflowDefinition`**: the same registry, the same catalog, the same start route, the same
+checkpoints, the same gates and events. Nothing downstream of registration knows which was used, and
+one host can run both at once.
+
+| | **1. In code (C#)** | **2. As a document (the DSL)** |
+| --- | --- | --- |
+| You write | A class implementing `IWorkflowDefinition<TContext, TResult>` | A JSON document validated against a published schema |
+| A node is | Any C# you can write, in a `HostExecutor<TIn, TOut>` | A declared `kind`, or a registered custom node named in the document |
+| Changing it needs | A build and a deploy | A file, validated at startup or through `POST /dsl/validate` |
+| Reaches | Everything on this page | Everything except arbitrary code, raw/agent/sub-workflow bindings and iteration |
+| Read next | **[Authoring workflows in C#](workflow-authoring-guide.md)** — the complete reference: every built-in executor, edge, gate, notification, trigger, audit hook and middleware seam, with worked variations and an options reference | **[Authoring workflows with the Abacus DSL](dsl-authoring-guide.md)** — the complete reference: document anatomy, every node kind, the expression language, diagnostics and limits |
+
+The honest split: **code computes, documents compose.** Reach for C# when a node has real logic —
+iterating a collection, aggregating, arithmetic over a domain model — and for the DSL when the change
+is a threshold, a topic, an edge or a prompt, and you would rather not rebuild to make it. They mix:
+domain logic in custom nodes written once, composed by a document that anyone can edit.
+[Which one to reach for](#which-one-to-reach-for) compares them properly.
+
+The rest of this chapter is the **orientation for path 1** — enough to write a definition and know
+what the surface is. The [C# authoring guide](workflow-authoring-guide.md) is the reference behind it,
+and [Authoring with the DSL](#authoring-with-the-dsl) below is the orientation for path 2.
+
+---
+
+> **Reference:** what follows is the orientation. For the complete reference — every built-in
+> executor and its options, the full gate, notification, trigger and audit surfaces, the middleware
+> seams, worked variations and an options appendix — see
+> **[Authoring workflows in C#](workflow-authoring-guide.md)**.
 
 A workflow definition supplies a stable name, a semantic version, a typed context/result contract, and a method that builds an Agent Framework workflow graph.
 
@@ -678,6 +712,10 @@ public sealed class OrderWorkflow
 
 ## Authoring with the DSL
 
+> **Reference:** this chapter is the orientation. For the complete field-by-field reference — every
+> node kind, the full expression language, all diagnostic codes, and a framework coverage map —
+> see **[Authoring workflows with the Abacus DSL](dsl-authoring-guide.md)**.
+
 Everything above authors a workflow in C#. This authors one as a **JSON document**: validated against
 a published schema, interpreted at build time, and registered exactly like a compiled definition.
 Nothing about the runtime changes — same graph, same executors, same gates, same events.
@@ -949,6 +987,11 @@ looking at?* `GET /dsl/documents` reports each registered document's hash.
 
 `POST /dsl/validate` reflects the host's registered node names back to the caller, so it takes the
 same authorization as the catalog routes.
+
+The ordinary catalog answers the same question from the other direction: `GET /workflows/{name}`
+reports `source` — `"dsl"` or `"compiled"` — and, for a document, the `documentHash`. A compiled
+definition reports `"compiled"` with a null hash, so an operator reading one catalog can tell which
+front end authored each version without knowing in advance that the DSL is installed.
 
 ### Limits
 
@@ -2231,375 +2274,22 @@ Check the URL scheme, whether the target resolves to an internal address, and wh
 
 ## Appendix: authoring variations
 
-Each recipe is a complete `BuildAsync` (or the declaration that matters), showing one shape in
-isolation. They compose — the [worked definition](#a-definition-using-all-of-it) above combines
-several.
-
-### A.1 Linear
-
-The default shape. One node after another, output from the last.
-
-```csharp
-public ValueTask<Workflow> BuildAsync(WorkflowBuildContext context, CancellationToken ct)
-{
-    ExecutorBinding validate = context.Node(new Validate("validate"));
-    ExecutorBinding enrich   = context.Node(new Enrich("enrich"));
-    ExecutorBinding submit   = context.Node(new Submit("submit"));
-
-    return new ValueTask<Workflow>(new WorkflowBuilder(validate)
-        .AddEdge(validate, enrich)
-        .AddEdge(enrich, submit)
-        .WithOutputFrom(submit)
-        .WithName(Name)
-        .Build());
-}
-```
-
-### A.2 Branch
-
-Two conditional edges out of one node. There is no switch construct; this is the branch.
-
-```csharp
-ExecutorBinding triage = context.Node(new Triage("triage"));
-ExecutorBinding fast   = context.Node(new FastPath("fast-path"));
-ExecutorBinding manual = context.Node(new ManualPath("manual-path"));
-
-return new ValueTask<Workflow>(new WorkflowBuilder(triage)
-    .AddEdge<Order>(triage, fast,   condition: o => o is { Amount: <= 10_000m })
-    .AddEdge<Order>(triage, manual, condition: o => o is { Amount: >  10_000m })
-    .WithOutputFrom(fast, manual)          // whichever branch ran supplies the result
-    .WithName(Name)
-    .Build());
-```
-
-The condition's parameter is `T?`, so a pattern (`o is { … }`) reads better than a null-forgiving
-dereference and handles the null case explicitly.
-
-Make the predicates exhaustive. A message matching neither edge stops there, and the run completes
-with no output rather than failing — which looks like success and is the hardest branch bug to spot.
-
-### A.3 Fan-out and fan-in
-
-```csharp
-ExecutorBinding split   = context.Node(new Split("split"));
-ExecutorBinding credit  = context.Node(new CheckCredit("check-credit"));
-ExecutorBinding stock   = context.Node(new CheckStock("check-stock"));
-ExecutorBinding fraud   = context.Node(new CheckFraud("check-fraud"));
-ExecutorBinding decide  = context.Node(new FanInExecutor<CheckResult, Decision>(
-    "decide", checks => new Decision(checks.All(c => c.Passed))));
-
-return new ValueTask<Workflow>(new WorkflowBuilder(split)
-    .AddFanOutEdge(split, [credit, stock, fraud])
-    .AddFanInBarrierEdge([credit, stock, fraud], decide)   // waits for all three
-    .WithOutputFrom(decide)
-    .WithName(Name)
-    .Build());
-```
-
-Selective fan-out picks targets by index instead of sending to all:
-
-```csharp
-.AddFanOutEdge<Order>(split, [credit, stock, fraud],
-    targetSelector: (order, count) => order!.SkipFraudCheck ? [0, 1] : [0, 1, 2])
-```
-
-A wide fan-out is the usual reason to set `NotificationLevel.Lifecycle` — see [A.10](#a10-quiet-a-chatty-workflow).
-
-### A.4 Approval gates
-
-Three ways to gate, from blunt to conditional:
-
-```csharp
-// Always requires a decision.
-context.Node(new Publish("publish"), gate => gate
-    .Mode(ExecutionMode.RequireApproval)
-    .AssignTo("group:ops")
-    .ExpiresAfter(TimeSpan.FromHours(4)));
-
-// Only above a threshold. `When` implies Conditional mode.
-context.Node(new Settle("settle"), gate => gate
-    .When<Order>(order => order.Amount > 25_000m)
-    .Reason("AmountAboveThreshold")
-    .RequireApprovers(2)
-    .AllowModification());
-
-// A floor a tenant may tighten but never weaken.
-context.Node(new Payout("payout"), gate => gate
-    .Mode(ExecutionMode.RequireApproval)
-    .AssignTo("group:finance")
-    .RequireSegregationOfDuties()
-    .OnExpiry(ExpiryAction.DeadStop)
-    .Locked());
-```
-
-`HumanApprovalExecutor<T>` does the same job as a node rather than as configuration, when the
-approval is part of the workflow's own logic and should be visible in the graph:
-
-```csharp
-ExecutorBinding signOff = context.Node(new HumanApprovalExecutor<Order>("sign-off"));
-```
-
-### A.5 Durable delay
-
-`DelayExecutor` checkpoints and halts rather than blocking a thread or holding a lease, so a long
-delay costs no execution capacity.
-
-```csharp
-var timers = context.Services!.GetRequiredService<ITimerService>();
-
-ExecutorBinding cooloff = context.Node(
-    new DelayExecutor("cool-off", TimeSpan.FromHours(24), timers));
-
-return new ValueTask<Workflow>(new WorkflowBuilder(submit)
-    .AddEdge(submit, cooloff)
-    .AddEdge(cooloff, settle)
-    .WithOutputFrom(settle)
-    .Build());
-```
-
-### A.6 HTTP call
-
-```csharp
-ExecutorBinding fetch = context.Node(new ApiCallExecutor("fetch-invoice",
-    new ApiCallOptions
-    {
-        Method = HttpMethod.Get,
-        UrlTemplate = "https://erp.internal/invoices/{{ context.InvoiceId }}",
-        Headers = { ["Accept"] = "application/json" },
-        TimeoutSeconds = 15,
-        SuccessCodes = [200, 204],
-        ResponseAs = typeof(InvoiceDto),
-        AllowedHosts = ["erp.internal"],
-        EnforceEgress = true,        // refuse anything not on the allow-list
-        SendIdempotencyKey = true    // safe to retry
-    },
-    () => context.Services!.GetRequiredService<IHttpClientFactory>()
-        .CreateClient(ApiCallOptions.HttpClientName)));
-```
-
-A non-success status arrives as a typed `ApiCallFailure` carrying status, body excerpt and
-`Retry-After`, so [`Classify`](#a12-custom-failure-classification) can act on it rather than parsing
-a message.
-
-### A.7 LLM node
-
-```csharp
-ExecutorBinding classify = context.Node(new LlmExecutor("classify",
-    new LlmOptions
-    {
-        Model = "claude-sonnet-5",
-        SystemPrompt = "Classify the invoice.",
-        PromptVersion = "v3",                 // tags the drift baseline
-        UserTemplate = "{{ context.DocumentText }}",
-        StructuredOutput = typeof(Classification),
-        Temperature = 0.0f,
-        MaxTokens = 2048,
-        StreamDeltas = true,                  // llm.delta frames, live only
-        EmitCompletion = true                 // one llm.completed per call (default)
-    },
-    model => context.Services!.GetRequiredService<IChatClient>(),
-    context.Services!.GetService<IModelPricing>()));   // enables costUsd and cost drift
-```
-
-Pass the pricing service or `costUsd` is `null` — absent, not zero. See
-[LLM telemetry](#llm-telemetry).
-
-### A.8 Started by an event
-
-```csharp
-public sealed class ShipOrderWorkflow
-    : IWorkflowDefinition<OrderPlaced, ShipmentResult>, IDomainEventTriggeredWorkflow
-{
-    public string Name => "ship-order";
-    public string Version => "1.0.0";
-
-    public IReadOnlyList<DomainEventTrigger> Triggers =>
-    [
-        new DomainEventTrigger { TopicFilter = "orders.placed" },
-        new DomainEventTrigger
-        {
-            TopicFilter = "orders.*.expedited",
-            ContextSelector = m => m.PayloadJson      // remap if the payload is not the context
-        }
-    ];
-
-    // BuildAsync as usual; the message payload arrives as the context.
-}
-```
-
-The message payload becomes the instance context, and its correlation key becomes the instance's
-correlation id. Redelivery is absorbed by the launcher's idempotency key, so a message cannot start
-the same workflow twice.
-
-### A.9 Publish and wait
-
-A two-workflow pipeline. The first publishes; the second parks until the reply arrives.
-
-```csharp
-// Producer — publishing is a side effect on the way past, so the node drops into an existing edge.
-var broker = context.Services!.GetRequiredService<IDomainEventBroker>();
-
-ExecutorBinding publish = context.Node(new PublishDomainEventExecutor<OrderPlaced>(
-    "publish-order-placed", broker,
-    topic: "orders.placed",
-    correlationKey: o => o.OrderId));
-
-// Consumer — parks, releases its lease, and resumes with the payload.
-var subscriptions = context.Services!.GetRequiredService<IDomainEventSubscriptionStore>();
-
-ExecutorBinding awaitPayment = context.Node(
-    new WaitForDomainEventExecutor<OrderContext, PaymentSettled>(
-        "await-settlement", subscriptions,
-        topicFilter: "payment.settled",
-        correlationKey: o => o.OrderId,
-        timeout: TimeSpan.FromDays(3),
-        onExpiry: WaitExpiryAction.DeadStop));   // or Resume, to take a timeout branch
-```
-
-Publishing across a service boundary is a scope on the message, not a different call — see
-[Local by default, global by declaration](#local-by-default-global-by-declaration).
-
-### A.10 Quiet a chatty workflow
-
-```csharp
-public NotificationPolicy Notifications { get; } = new()
-{
-    Level = NotificationLevel.Lifecycle,          // supersteps, no per-node chatter
-    ByNode = new Dictionary<string, NotificationLevel>(StringComparer.Ordinal)
-    {
-        ["reconcile"] = NotificationLevel.Standard  // except this one
-    }
-};
-```
-
-### A.11 Log without streaming
-
-```csharp
-public NotificationPolicy Notifications { get; } = new()
-{
-    StreamEvents = false        // full event log; no SSE
-};
-```
-
-The log is unconditional either way. `GET /instances/{id}/events` then returns `409` naming
-`GET /v2/workflows/{name}/instances/{id}/events`. See
-[Turning SSE off for a workflow](#turning-sse-off-for-a-workflow).
-
-### A.12 Custom notifications from a node
-
-```csharp
-public NotificationPolicy Notifications { get; } = new()
-{
-    Emits = ["documents.scanned"]     // advertised on GET /workflows/{name}
-};
-```
-
-```csharp
-protected override async ValueTask<ScanResult> ExecuteCoreAsync(
-    ScanContext input, IWorkflowContext context, CancellationToken ct)
-{
-    if (Runtime.Notify is { } notify)
-    {
-        await notify.NotifyAsync("documents.scanned", new { count = input.Documents.Count }, ct);
-    }
-    // → event: custom.documents.scanned
-}
-```
-
-### A.13 Audit record
-
-```csharp
-public AuditRecordDefinition AuditRecord { get; } = new(
-    "order", "One order, as processed.",
-    [
-        new AuditSectionDefinition("submission", "What was submitted.", Multiple: false),
-        new AuditSectionDefinition("step", "One processing step."),
-        new AuditSectionDefinition("outcome", "How the run settled.", Multiple: false)
-    ]);
-```
-
-```csharp
-if (Runtime.Audit is { } audit)
-{
-    await audit.OpenAsync(input.OrderId, attributes: null, ct);
-    await audit.RecordAsync("step", key: input.LineId, new { accepted = true }, ct);
-    await audit.CloseAsync(AuditRecordStatus.Completed, ct);
-}
-```
-
-Keying an entry means a retried executor corrects its record rather than doubling it. See
-[Workflow audit records](#workflow-audit-records).
-
-### A.14 Custom failure classification
-
-```csharp
-public FailureDisposition Classify(WorkflowFailure failure) => failure.Exception switch
-{
-    InsufficientFundsException  => FailureDisposition.DeadStop,   // retrying cannot help
-    ThirdPartyThrottleException => FailureDisposition.Retry,
-    ReconciliationBreakException => FailureDisposition.Escalate,  // terminal, flag for an operator
-    _ => DefaultFailureClassifier.Instance.Classify(failure)
-};
-```
-
-Classify per node when the same exception means different things in different places — the failure
-carries `ExecutorId` and the executor's `Metadata`:
-
-```csharp
-public FailureDisposition Classify(WorkflowFailure failure)
-    => failure is { ExecutorId: "optional-enrichment", Exception: HttpRequestException }
-        ? FailureDisposition.DeadStop        // this node is best-effort; do not burn attempts
-        : DefaultFailureClassifier.Instance.Classify(failure);
-```
-
-### A.15 Raw nodes, agents and sub-workflows
-
-Raw nodes join the graph but run outside the executor middleware pipeline and cannot be
-approval-gated — passing a gate block throws.
-
-```csharp
-// An AIAgent as a node.
-ExecutorBinding triage = context.RawNode(someAgent.BindAsExecutor("triage-agent"));
-
-// Another workflow as a node.
-Workflow enrichment = BuildEnrichmentGraph();
-ExecutorBinding enrich = context.RawNode(enrichment.BindAsExecutor("enrich"));
-
-// A bare handler, with no executor class at all.
-Func<Order, IWorkflowContext, CancellationToken, ValueTask> logHandler =
-    (order, _, _) => { Log(order); return ValueTask.CompletedTask; };
-ExecutorBinding log = context.RawNode(logHandler.BindAsExecutor<Order>("log"));
-
-ExecutorBinding record = context.Node(new Record("record"));   // gated, audited, with middleware
-
-return new ValueTask<Workflow>(new WorkflowBuilder(triage)
-    .AddEdge(triage, enrich)
-    .AddEdge(enrich, log)
-    .AddEdge(log, record)
-    .WithOutputFrom(record)
-    .Build());
-```
-
-A sub-workflow node runs the child graph inline. It is not a child *instance* — there is no separate
-instance row, lease or event stream for it, and its nodes are not separately gateable or
-configurable. Use `SubWorkflow` for composition of graph shape; use an event trigger
-([A.8](#a8-started-by-an-event)) when you want a genuinely independent run.
-
-### A.16 Registering what you built
-
-```csharp
-builder.Services
-    .AddAbacus(builder.Configuration)          // or AddWorkflowHost + AddBuiltInMiddleware + AddBackgroundServices
-    .AddWorkflow<OrderWorkflow>()              // resolved from DI
-    .AddWorkflow(new ShipOrderWorkflow())      // or supplied directly
-    .AddExecutorMiddleware<TimingMiddleware>();
-```
-
-Without `AddBackgroundServices()` instances are created and stay `Pending` — nothing executes them.
-See [Registering workflows and middleware](#registering-workflows-and-middleware).
+The worked variations now live with the reference for each front end, so a recipe sits beside the
+field reference it uses rather than a chapter away from it:
+
+- **[C# — Appendix A](workflow-authoring-guide.md#appendix-a--worked-variations)** — A.1 linear, A.2
+  branch, A.3 fan-out and fan-in, A.4 approval gates, A.5 durable delay, A.6 HTTP call, A.7 LLM node,
+  A.8 started by an event, A.9 publish and wait, A.10 quiet a chatty workflow, A.11 log without
+  streaming, A.12 custom notifications, A.13 audit record, A.14 custom failure classification,
+  A.15 raw nodes, agents and sub-workflows, A.16 registering what you built.
+- **[DSL — Appendix A](dsl-authoring-guide.md#appendix-a--worked-variations)** — the same shapes as
+  documents, so the two read side by side.
 
 ## Related documents
 
+- [`workflow-authoring-guide.md`](workflow-authoring-guide.md) - Complete reference for authoring workflows in C#
+- [`dsl-authoring-guide.md`](dsl-authoring-guide.md) - Complete reference for authoring workflows as JSON documents
+- [`schema/abacus-workflow-dsl-1.0.json`](schema/abacus-workflow-dsl-1.0.json) - The DSL's normative JSON Schema
 - [`README.md`](../README.md) - Short setup and API overview
 - [`PRD-Abacus-Run.md`](PRD-Abacus-Run.md) - Product requirements and target architecture
 - [`TDD-Abacus-Run.md`](TDD-Abacus-Run.md) - Technical design and framework grounding

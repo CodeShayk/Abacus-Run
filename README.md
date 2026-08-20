@@ -87,6 +87,12 @@ builder.Services
 
 `OrderWorkflow` must implement `IWorkflowDefinition` or `IWorkflowDefinition<TContext, TResult>`. Use `WorkflowBuildContext.Node(...)` to attach host executors and declare approval gates.
 
+There are two ways to author a workflow, and both produce an `IWorkflowDefinition` on the same
+runtime: **in C#**, as above, or **as a JSON document** ([Authoring with the DSL](#authoring-with-the-dsl)
+below). Code computes, documents compose; a host can run both at once. Complete references:
+[Authoring workflows in C#](docs/workflow-authoring-guide.md) and
+[Authoring workflows with the Abacus DSL](docs/dsl-authoring-guide.md).
+
 ### Declaring executor gates
 
 A node attached with no gate block runs autonomously. Pass a gate block to require a human decision, either always or under a predicate:
@@ -476,9 +482,13 @@ DSL0207  error  /edges/5/to          Edge targets 'setle', which is not a node. 
 
 An invalid document fails startup. A published `(name, version)` is immutable, enforced by a
 canonical hash of the document. Routes: `GET /dsl/schema`, `/dsl/nodes`, `/dsl/functions`,
-`/dsl/documents`, and `POST /dsl/validate`.
+`/dsl/documents`, and `POST /dsl/validate`. The ordinary catalog reports which front end authored
+each version: `GET /workflows/{name}` carries `source` — `dsl` or `compiled` — and, for a document,
+its `documentHash`.
 
-Full walkthrough: [Authoring with the DSL](docs/wiki.md#authoring-with-the-dsl).
+Full walkthrough: [Authoring with the DSL](docs/wiki.md#authoring-with-the-dsl) and the complete
+reference, [Authoring workflows with the Abacus DSL](docs/dsl-authoring-guide.md) — whose mirror for
+the compiled path is [Authoring workflows in C#](docs/workflow-authoring-guide.md).
 Schema: [docs/schema/abacus-workflow-dsl-1.0.json](docs/schema/abacus-workflow-dsl-1.0.json).
 
 ## Audit records
