@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../Abacus.Run/Abacus.Run.csproj" />
+    <ProjectReference Include="../Abacus.Run.Dsl/Abacus.Run.Dsl.csproj" />
 
     <!-- Transports are adapters, selected by configuration. The host references both so an operator
          can choose either without a rebuild; neither is loaded unless its connection string is set. -->

@@ -165,6 +165,17 @@ public static class Endpoints
                         contextType = v.ContextType.Name,
                         resultType = v.ResultType.Name,
 
+                        // Where this version was authored. "compiled" is the answer for a C#
+                        // definition; a document-authored one names its own front end and carries
+                        // the hash of the document that produced it, so a deployment can be checked
+                        // against the revision it was meant to be running.
+                        source = v.Definition is IDocumentAuthoredWorkflow authored
+                            ? authored.Source
+                            : "compiled",
+                        documentHash = v.Definition is IDocumentAuthoredWorkflow hashed
+                            ? hashed.DocumentHash
+                            : null,
+
                         // What a subscriber may expect from this workflow beyond the framework's own
                         // events — discoverable, the way node descriptors already advertise gates.
                         notifications = v.Definition is INotifyingWorkflow notifying

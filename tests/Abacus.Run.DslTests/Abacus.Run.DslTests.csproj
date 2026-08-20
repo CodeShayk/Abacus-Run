@@ -1,16 +1,19 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <IsPackable>false</IsPackable>
+    <CollectCoverage>true</CollectCoverage>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../../src/Abacus.Run.Dsl/Abacus.Run.Dsl.csproj" />
-    <ProjectReference Include="../../src/Abacus.Run.Service/Abacus.Run.Service.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     <PackageReference Include="FluentAssertions" Version="6.12.2" />
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="9.0.9" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="$(MicrosoftExtensionsVersion)" />
     <PackageReference Include="coverlet.collector" Version="6.0.2" />
+    <PackageReference Include="coverlet.msbuild" Version="6.0.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Abacus.Run.Dsl/Abacus.Run.Dsl.csproj" />
   </ItemGroup>
 </Project>

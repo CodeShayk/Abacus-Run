@@ -1,0 +1,72 @@
+{
+  "dsl": "abacus.workflow/1.0",
+  "name": "example-order-dsl",
+  "version": "1.0.0",
+  "description": "The shipped example, authored as a document instead of C#.",
+
+  "context": {
+    "type": "object",
+    "required": ["orderId", "amount"],
+    "properties": {
+      "orderId": { "type": "string", "minLength": 1 },
+      "amount": { "type": "number", "minimum": 0 },
+      "currency": { "type": "string", "default": "GBP" }
+    }
+  },
+
+  "start": "price",
+  "output": ["settle"],
+
+  "nodes": [
+    {
+      "id": "price",
+      "kind": "transform",
+      "description": "Applies VAT and carries the order forward.",
+      "set": {
+        "orderId": "$ctx.orderId",
+        "net": "$ctx.amount",
+        "vat": "$ctx.amount * 0.2",
+        "total": "$ctx.amount * 1.2",
+        "currency": "coalesce($ctx.currency, 'GBP')"
+      },
+      "notify": {
+        "name": "priced",
+        "payload": { "order": "$.orderId", "total": "$.total" }
+      }
+    },
+    {
+      "id": "settle",
+      "kind": "transform",
+      "description": "Settles the order. Large ones need a human first.",
+      "set": {
+        "orderId": "$.orderId",
+        "total": "$.total",
+        "status": "'settled'"
+      },
+      "gate": {
+        "mode": "conditional",
+        "when": "$.total > 25000",
+        "reason": "LargeSettlement",
+        "requireApprovers": 1,
+        "expiresAfter": "PT8H",
+        "onExpiry": { "action": "deadStop" }
+      }
+    }
+  ],
+
+  "edges": [
+    { "from": "price", "to": "settle" }
+  ],
+
+  "notifications": {
+    "level": "standard",
+    "stream": true
+  },
+
+  "onFailure": [
+    { "match": { "exception": "ApiCallFailureException", "status": "5xx" }, "disposition": "retry" },
+    { "match": { "exception": "WorkflowValidationException" }, "disposition": "deadStop" }
+  ],
+
+  "limits": { "maxAttempts": 3 }
+}

@@ -3,11 +3,13 @@
     <Project Path="src/Abacus.Run/Abacus.Run.csproj" />
     <Project Path="src/Abacus.Adapters.Cache.Redis/Abacus.Adapters.Cache.Redis.csproj" />
     <Project Path="src/Abacus.Adapters.Messaging.RabbitMQ/Abacus.Adapters.Messaging.RabbitMQ.csproj" />
+    <Project Path="src/Abacus.Run.Dsl/Abacus.Run.Dsl.csproj" />
     <Project Path="src/Abacus.Run.Service/Abacus.Run.Service.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Abacus.Run.IntegrationTests/Abacus.Run.IntegrationTests.csproj" />
     <Project Path="tests/Abacus.Run.UnitTests/Abacus.Run.UnitTests.csproj" />
+    <Project Path="tests/Abacus.Run.DslTests/Abacus.Run.DslTests.csproj" />
     <Project Path="tests/Abacus.Run.ChaosTests/Abacus.Run.ChaosTests.csproj" />
     <Project Path="tests/Abacus.Run.BrokerTests/Abacus.Run.BrokerTests.csproj" />
     <Project Path="tests/Abacus.Run.LoadTests/Abacus.Run.LoadTests.csproj" />

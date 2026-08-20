@@ -3,6 +3,25 @@ using System.Text.Json;
 
 namespace Abacus.Run.Executors;
 
+/// <summary>
+/// Implemented by a message type that resolves its own template placeholders.
+/// </summary>
+/// <remarks>
+/// The default resolution walks dotted paths by reflection, which suits a POCO context and nothing
+/// else. A message carrying more than one addressable object — the DSL envelope carries the start
+/// context alongside the current value — cannot be expressed as one dotted path over one root, so it
+/// takes the placeholder text and answers for itself. Opt-in: a type that does not implement this is
+/// resolved exactly as before.
+/// </remarks>
+public interface ITemplateBindingSource
+{
+    /// <summary>
+    /// Resolves the text between <c>{{</c> and <c>}}</c>. Returns null when it resolves to nothing,
+    /// which renders as empty — a template must not fail a run over an absent field.
+    /// </summary>
+    string? Resolve(string expression);
+}
+
 /// <summary>Named values available to a template, resolved by dotted path.</summary>
 public sealed class TemplateBindings
 {
@@ -21,6 +40,13 @@ public sealed class TemplateBindings
     public string? Resolve(string path)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
+
+        // Checked before the dotted-path walk so a self-resolving message keeps full control of its
+        // own placeholder syntax rather than having it parsed on its behalf first.
+        if (_root is ITemplateBindingSource source)
+        {
+            return source.Resolve(path);
+        }
 
         string[] segments = path.Split('.', StringSplitOptions.RemoveEmptyEntries);
         object? current = _root;
