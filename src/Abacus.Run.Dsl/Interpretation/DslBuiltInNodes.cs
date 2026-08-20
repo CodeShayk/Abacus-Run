@@ -399,20 +399,20 @@ internal static class DslBuiltInNodes
         {
             // Validation refuses this at registration, so reaching here means the catalog changed
             // underneath a document that was already accepted.
-            throw new InvalidOperationException(
+            throw new DslInterpretationException(
                 $"Node '{node.Id}' names custom node '{node.NodeName}', which is not registered. " +
                 $"Known: {(catalog.Names.Count == 0 ? "(none)" : string.Join(", ", catalog.Names))}.");
         }
 
         IHostExecutor executor = factory.Create(context)
-            ?? throw new InvalidOperationException(
+            ?? throw new DslInterpretationException(
                 $"The factory for custom node '{node.NodeName}' returned null for node '{node.Id}'.");
 
         if (executor.InputType != typeof(DslMessage) || executor.OutputType != typeof(DslMessage))
         {
             // Every edge in a DSL graph carries the envelope. A node emitting anything else breaks
             // the next edge rather than its own, so it is refused where the mistake was made.
-            throw new InvalidOperationException(
+            throw new DslInterpretationException(
                 $"Custom node '{node.NodeName}' produced an executor of " +
                 $"{executor.InputType.Name} -> {executor.OutputType.Name}. " +
                 $"A DSL node must be HostExecutor<{nameof(DslMessage)}, {nameof(DslMessage)}>.");
@@ -420,7 +420,7 @@ internal static class DslBuiltInNodes
 
         if (!string.Equals(executor.Id, node.Id, StringComparison.Ordinal))
         {
-            throw new InvalidOperationException(
+            throw new DslInterpretationException(
                 $"Custom node '{node.NodeName}' produced an executor with id '{executor.Id}', " +
                 $"but the document declared '{node.Id}'. Gate policy and node state key off the " +
                 "declared id, so they must match.");

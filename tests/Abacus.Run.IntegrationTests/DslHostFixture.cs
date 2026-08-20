@@ -157,7 +157,7 @@ public sealed class WrongShapeNodeFactory : IDslNodeFactory
 /// A host with only DSL workflows registered, so a failure is unambiguously about the DSL rather
 /// than about a compiled definition sitting beside it.
 /// </summary>
-public sealed class DslHostFixture : WebApplicationFactory<Program>
+public class DslHostFixture : WebApplicationFactory<Program>
 {
     public StubHttpHandler Http { get; } = new();
     public StubChatClient Chat { get; } = new();
@@ -166,12 +166,25 @@ public sealed class DslHostFixture : WebApplicationFactory<Program>
     private readonly string _auditDatabasePath =
         Path.Combine(Path.GetTempPath(), $"abacus-dsl-audit-{Guid.NewGuid():N}.db");
 
+    /// <summary>
+    /// The redaction policy this host runs under, or null for the framework default. Overridden by
+    /// the fixture that exists to prove a DSL message is redacted like any other.
+    /// </summary>
+    protected virtual IRedactionPolicy? Redaction => null;
+
     protected override IHost CreateHost(IHostBuilder builder)
     {
         builder.ConfigureServices(services =>
         {
             services.AddSingleton<ITimerService>(Timers);
             services.AddSingleton<IChatClient>(Chat);
+
+            if (Redaction is { } redaction)
+            {
+                // Registered last so it wins over the framework's TryAdd default, whichever order
+                // the host builder happens to run its callbacks in.
+                services.AddSingleton(redaction);
+            }
 
             // The DSL's http node resolves this named client, so a stub handler here reaches every
             // http node without any of them knowing they are under test.
@@ -284,4 +297,19 @@ public sealed class DslHostFixture : WebApplicationFactory<Program>
         {
         }
     }
+}
+
+/// <summary>
+/// The same host under a restrictive redaction policy: every body field is masked except the few
+/// named here. A DSL envelope carries more per message than a compiled one — the whole start context
+/// travels with every hop — so this fixture exists to prove that extra reach does not widen what
+/// leaves the process.
+/// </summary>
+public sealed class DslRedactedHostFixture : DslHostFixture
+{
+    public RedactionPolicy Policy { get; } = new(
+        bodyAllowList: ["order", "workflow", "version", "attempt", "resumed", "status", "executorId"],
+        allowAllBodyFields: false);
+
+    protected override IRedactionPolicy? Redaction => Policy;
 }

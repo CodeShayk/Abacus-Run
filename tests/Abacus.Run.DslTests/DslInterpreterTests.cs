@@ -351,6 +351,64 @@ public class DslWorkflowDefinitionTests
     }
 
     /// <summary>
+    /// A document that cannot be interpreted will not interpret on the next attempt either. Retrying
+    /// it spends the attempt budget to arrive at the same message, so it stops.
+    /// </summary>
+    [Fact]
+    public void An_interpretation_failure_dead_stops()
+    {
+        DslWorkflowDefinition definition = Build(DslFixtures.MinimalText);
+
+        definition.Classify(Failure(new DslInterpretationException("wrong shape")))
+            .Should().Be(FailureDisposition.DeadStop);
+    }
+
+    /// <summary>
+    /// A build failure arrives wrapped in whatever the graph construction threw it into, so the
+    /// classifier walks the chain rather than testing the outermost type.
+    /// </summary>
+    [Fact]
+    public void A_wrapped_interpretation_failure_dead_stops_too()
+    {
+        DslWorkflowDefinition definition = Build(DslFixtures.MinimalText);
+
+        definition.Classify(Failure(new InvalidOperationException("build failed",
+                new DslInterpretationException("wrong shape"))))
+            .Should().Be(FailureDisposition.DeadStop);
+
+        definition.Classify(Failure(new AggregateException(
+                new DslInterpretationException("wrong shape"))))
+            .Should().Be(FailureDisposition.DeadStop);
+    }
+
+    /// <summary>
+    /// And not overridable by the document, which is the one classification rule an author does not
+    /// get a say in. The schema does not even offer <c>DslInterpretationException</c> as a matchable
+    /// name, so the way a document could reach it is a rule matched on something else — here the node
+    /// the failure came from.
+    /// </summary>
+    [Fact]
+    public void A_documents_retry_rule_cannot_reopen_an_interpretation_failure()
+    {
+        string text = DslFixtures.Broken(d => d["onFailure"] = new JsonArray(
+            new JsonObject
+            {
+                ["match"] = new JsonObject { ["node"] = "a" },
+                ["disposition"] = "retry"
+            }));
+
+        DslWorkflowDefinition definition = Build(text);
+
+        definition.Classify(Failure(new DslInterpretationException("wrong shape"), "a"))
+            .Should().Be(FailureDisposition.DeadStop);
+
+        // The rule still governs everything else from that node, so the guard is narrow rather than
+        // a blanket override of the document.
+        definition.Classify(Failure(new InvalidOperationException("something else"), "a"))
+            .Should().Be(FailureDisposition.Retry);
+    }
+
+    /// <summary>
     /// A document should only have to state where it disagrees; the framework already knows a rate
     /// limit is worth retrying and a validation error is not.
     /// </summary>

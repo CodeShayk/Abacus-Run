@@ -28,6 +28,32 @@ public interface IWorkflowDefinition<TContext, TResult> : IWorkflowDefinition
 }
 
 /// <summary>
+/// Implemented by a definition that was authored somewhere other than C#, so the catalog can say
+/// where a workflow came from and which revision of that source is running.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The framework cannot name the DSL — <c>Abacus.Run</c> does not reference it, and must not. So the
+/// front end answers for itself, and the catalog reports <c>compiled</c> for any definition that does
+/// not implement this. That keeps provenance discoverable without the framework knowing what front
+/// ends exist.
+/// </para>
+/// <para>
+/// <see cref="DocumentHash"/> is what makes two hosts comparable: same name, same version and same
+/// hash is the same workflow, and a differing hash for a published version is a deployment fault
+/// rather than a curiosity.
+/// </para>
+/// </remarks>
+public interface IDocumentAuthoredWorkflow
+{
+    /// <summary>The front end that produced this definition, lowercase — for example <c>dsl</c>.</summary>
+    string Source { get; }
+
+    /// <summary>The canonical hash of the source document.</summary>
+    string DocumentHash { get; }
+}
+
+/// <summary>
 /// One executor node of a workflow graph as the definition declared it. Produced during a build and
 /// surfaced by the catalog API so a tenant can see what there is to configure.
 /// </summary>

@@ -4,6 +4,27 @@ using Abacus.Run.Dsl.Model;
 
 namespace Abacus.Run.Dsl.Interpretation;
 
+/// <summary>
+/// A document that validated but cannot be turned into a graph.
+/// </summary>
+/// <remarks>
+/// Distinct from <c>DslValidationException</c> because it is thrown during a build rather than at
+/// registration, and distinct from an ordinary node failure because it is deterministic: the
+/// interpretation that failed on this attempt will fail identically on the next one. Classified as a
+/// dead stop for exactly that reason — retrying it only burns attempts before reporting the same
+/// message.
+/// </remarks>
+public sealed class DslInterpretationException : Exception
+{
+    public DslInterpretationException(string message) : base(message)
+    {
+    }
+
+    public DslInterpretationException(string message, Exception inner) : base(message, inner)
+    {
+    }
+}
+
 /// <summary>What a factory is given when a document asks for one of its nodes.</summary>
 public sealed record DslNodeContext(
     DslNode Node,

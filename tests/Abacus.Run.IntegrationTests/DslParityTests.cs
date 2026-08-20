@@ -5,6 +5,7 @@ using Abacus.Run.Abstractions;
 using Abacus.Run.Api;
 using Abacus.Run.Core;
 using Abacus.Run.Dsl.Hosting;
+using Abacus.Run.Dsl.Interpretation;
 using FluentAssertions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -231,6 +232,59 @@ public class DslParityTests : IClassFixture<ParityHostFixture>
         string[] names = [.. catalog.EnumerateArray().Select(w => w.GetProperty("name").GetString()!)];
 
         names.Should().Contain("parity-compiled").And.Contain("parity-dsl");
+    }
+
+    /// <summary>
+    /// Side by side is not the same as indistinguishable. An operator looking at a running host needs
+    /// to know which of two workflows came from a document, and this is the only fixture where both
+    /// answers are available from one catalog.
+    /// </summary>
+    [Fact]
+    public async Task The_catalog_says_which_front_end_authored_each_version()
+    {
+        using HttpClient client = _fixture.CreateClient();
+
+        JsonElement compiled = await client.GetFromJsonAsync<JsonElement>("/workflows/parity-compiled");
+        JsonElement version = compiled.GetProperty("versions").EnumerateArray().Single();
+
+        version.GetProperty("source").GetString().Should().Be("compiled");
+        version.GetProperty("documentHash").ValueKind.Should().Be(JsonValueKind.Null,
+            "a C# definition has no document to hash");
+
+        JsonElement document = await client.GetFromJsonAsync<JsonElement>("/workflows/parity-dsl");
+        JsonElement dslVersion = document.GetProperty("versions").EnumerateArray().Single();
+
+        dslVersion.GetProperty("source").GetString().Should().Be("dsl");
+        dslVersion.GetProperty("documentHash").GetString().Should().NotBeNullOrWhiteSpace();
+    }
+
+    /// <summary>
+    /// The hash the catalog reports must be the hash of the document that was registered — the same
+    /// value the DSL's own route reports, and the same value again after a restart of the same
+    /// composition. A hash that only agreed with itself would detect no drift at all.
+    /// </summary>
+    [Fact]
+    public async Task The_catalog_hash_is_the_registered_documents_hash()
+    {
+        using HttpClient client = _fixture.CreateClient();
+
+        JsonElement documents = await client.GetFromJsonAsync<JsonElement>("/dsl/documents");
+        string expected = documents.EnumerateArray()
+            .Single(d => d.GetProperty("name").GetString() == "parity-dsl")
+            .GetProperty("documentHash").GetString()!;
+
+        JsonElement workflow = await client.GetFromJsonAsync<JsonElement>("/workflows/parity-dsl");
+
+        workflow.GetProperty("versions").EnumerateArray().Single()
+            .GetProperty("documentHash").GetString().Should().Be(expected);
+
+        // Deterministic across processes, not merely within one: the point of the hash is that two
+        // hosts can be compared.
+        DslWorkflowDefinition registered = _fixture.Resolve<DslRegistry>().Find("parity-dsl")!;
+        registered.DocumentHash.Should().Be(expected);
+        Abacus.Run.Dsl.Validation.DslCanonicalHash
+            .Compute(JsonNode.Parse(ParityHostFixture.Document)!)
+            .Should().Be(expected, "the hash is of the document text, computable without a host");
     }
 
     /// <summary>Property casing differs between the two serializers; compare values, not spellings.</summary>

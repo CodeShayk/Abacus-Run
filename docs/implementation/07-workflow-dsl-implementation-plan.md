@@ -16,8 +16,8 @@ workflow behaves; the DSL is a second front end onto the runtime that already ex
 
 ## Status
 
-Phases 1–5 landed. Suites green: **723 unit** (unchanged), **358 DSL unit**, **209 integration**
-(+59), **7 chaos**.
+Phases 1–5 landed, complete against the plan as written. Suites green: **723 unit** (unchanged),
+**361 DSL unit**, **232 integration** (+82), **7 chaos**.
 
 | Delivered | Where |
 | --------- | ----- |
@@ -30,18 +30,28 @@ Phases 1–5 landed. Suites green: **723 unit** (unchanged), **358 DSL unit**, *
 | Deferred registration, directory loading, custom node catalog | [Hosting/](../../src/Abacus.Run.Dsl/Hosting/) |
 | `IContextValidatingWorkflow`, consulted after the type bind | [Core/WorkflowRegistry.cs](../../src/Abacus.Run/Core/WorkflowRegistry.cs) |
 | `ITemplateBindingSource` | [Executors/TemplateEngine.cs](../../src/Abacus.Run/Executors/TemplateEngine.cs) |
+| `IDocumentAuthoredWorkflow`, so the catalog reports `source` and `documentHash` | [Abstractions/WorkflowDefinition.cs](../../src/Abacus.Run/Abstractions/WorkflowDefinition.cs), [Api/Endpoints.cs](../../src/Abacus.Run/Api/Endpoints.cs) |
 | `/dsl/schema`, `/dsl/nodes`, `/dsl/functions`, `/dsl/documents`, `/dsl/validate` | [Hosting/DslEndpoints.cs](../../src/Abacus.Run.Dsl/Hosting/DslEndpoints.cs) |
+| Architecture boundary tests for the DSL project | [ArchitectureBoundaryTests.cs](../../tests/Abacus.Run.IntegrationTests/ArchitectureBoundaryTests.cs) |
+| Redaction and large-context coverage | [DslEnvelopeTests.cs](../../tests/Abacus.Run.IntegrationTests/DslEnvelopeTests.cs) |
 | Wiki chapter, README section, project-layout rows | [wiki.md](../wiki.md#authoring-with-the-dsl), [README.md](../../README.md) |
 | Shipped example document | [example-order.workflow.json](../../src/Abacus.Run.Service/Workflows/ExampleOrder/example-order.workflow.json) |
 
 ### Deviations from the plan as written
 
-**The core change is two interfaces, not one.** `IContextValidatingWorkflow` was planned.
+**The core change is three interfaces, not one.** `IContextValidatingWorkflow` was planned.
+
 `ITemplateBindingSource` was not: `TemplateBindings` resolves dotted paths by reflection over a
 single root object, which cannot address an envelope carrying both a context and a payload. It is
 additive and opt-in — a type that does not implement it resolves exactly as before — and it is what
 lets `{{ $ctx.orderId }}` work inside the existing `ApiCallExecutor` and `LlmExecutor` rather than
 forking either.
+
+`IDocumentAuthoredWorkflow` was not either, and is what §4.3's fourth row needed. The catalog cannot
+report `source: "dsl"` by naming the DSL, because `Abacus.Run` does not reference it and must not. So
+a definition answers for itself: `GET /v2/workflows/{name}` reports what the definition says, or
+`"compiled"` with a null hash for one that says nothing. Same probe-by-`is` pattern the runtime
+already uses for `INotifyingWorkflow`, and the framework still knows of no front end.
 
 **Two grammar changes.** Unary `!` and `-` bind tightest, rather than sitting between `&&` and
 comparison as first written — `!has($.x) && …` is the common shape and standard precedence is what
@@ -88,6 +98,15 @@ across a serialization round trip.
 because it built its kind lookup with `ToDictionary`. Now built tolerantly, with robustness tests
 over pathological documents.
 
+**A custom node of the wrong shape was retried.** A factory that hands back anything other than
+`HostExecutor<DslMessage, DslMessage>` is refused during the build, which was correct, but the
+failure classified as retryable: the run burned its whole attempt budget re-deriving the same
+message before stopping. Interpretation failures now throw `DslInterpretationException` and classify
+as a dead stop ahead of the document's own `onFailure` rules — a document that cannot be interpreted
+will not interpret on the next attempt either, and an author does not get a say in that one. Found by
+writing the integration test for the shape check, which had been registered in the fixture but never
+exercised.
+
 ### Pre-existing issues found, not fixed here
 
 **`FanInExecutor<TItem, TOut>` cannot work with `AddFanInBarrierEdge`.** It is declared
@@ -102,8 +121,9 @@ node — and a compiled workflow using `DelayExecutor` — cannot run on a stock
 fixture registers an in-memory implementation; a deployable host has nothing.
 
 Phases 1–2 are independently testable with no host involved and carry most of the risk. Phase 3 is
-mechanical once they land. Phase 4 is small — deliberately, because the design keeps the core change
-to a single opt-in interface.
+mechanical once they land. Phase 4 is small — deliberately, because every core change it needs is an
+opt-in interface a definition may implement, and the three it added together come to a few dozen
+lines of framework code.
 
 ---
 
@@ -415,8 +435,8 @@ covers the common case in v1.
 | --- | --- |
 | The expression language grows into a scripting host | The function set is closed and small; extension goes through `custom` nodes, not new syntax. Adding a function is a deliberate change to a documented list. |
 | Diagnostics are unhelpful and the DSL is abandoned | Pointer accuracy is a tested requirement from Phase 2, not a polish item. Every diagnostic code has a test asserting its pointer. |
-| The envelope's `ctx` inflates checkpoints | `Ctx` is a reference copy, cloned once at start. Measured in Phase 3 with a large-context fixture. |
-| Redaction gaps — more data is in flight per message | DSL nodes traverse the same middleware pipeline. An integration test asserts a redacted field in `ctx` stays redacted at the last node. |
+| The envelope's `ctx` inflates checkpoints | `Ctx` is a reference copy, cloned once at start. Measured: a 128 KB context through a four-hop document, asserting the checkpoint holds about one context rather than one per hop, and that the last superstep is no heavier than the first. |
+| Redaction gaps — more data is in flight per message | DSL nodes traverse the same middleware pipeline. Measured under a restrictive policy: the node reads the secret, no event in the run carries it, and the instance's own state still does — so the run can still resume. |
 | Schema drift between published and embedded | One file, embedded from `docs/schema/`; a test asserts byte equality. |
 | The DSL looks like it can do anything and cannot | §11 of the design and the wiki chapter both state the boundary. `custom` is presented as the answer, not as an escape hatch. |
 
@@ -426,9 +446,13 @@ covers the common case in v1.
 
 | Suite | Added | Covers |
 | --- | --- | --- |
-| Unit | ~405 | AbEx, model, validation, interpreter, factories |
-| Integration | ~70 | Startup, catalog, endpoints, end-to-end runs, redaction, parity with the compiled example |
-| Architecture | 3 | `Abacus.Run.Dsl` depends only on the public surface; no host reference; schema resource matches the file |
+| Unit | 361 | AbEx, model, validation, interpreter, factories, failure classification |
+| Integration | 82 | Startup, egress enforcement, catalog and provenance, endpoints and their authorization, end-to-end runs of every node kind, redaction, checkpoint size, parity |
+| Architecture | 4 | `Abacus.Run.Dsl` depends only on the public surface; no host or infrastructure reference; the framework does not reference the DSL; the schema ships as one embedded resource |
+
+The DSL suite is its own project, so those 361 are not part of the 723 the framework already had.
+Byte equality between the embedded schema and the published file is asserted in the DSL suite, where
+the resource is readable; the architecture test asserts there is exactly one such resource.
 
 `dotnet build Abacus.Run.slnx` then `dotnet test`, with the existing suites unchanged — the
 `IContextValidatingWorkflow` hook is the only core edit, and nothing implements it today.

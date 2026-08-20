@@ -349,6 +349,95 @@ internal static class DslDocuments
     }
     """;
 
+    /// <summary>
+    /// Carries a secret in the start context, reads it in a node, and puts it in a notification
+    /// payload. The node must see the real value; anything that leaves the process must not.
+    /// </summary>
+    internal const string Secret = """
+    {
+      "dsl": "abacus.workflow/1.0",
+      "name": "dsl-secret",
+      "version": "1.0.0",
+      "start": "handle",
+      "output": ["handle"],
+      "nodes": [
+        { "id": "handle", "kind": "transform",
+          "set": {
+            "order": "$ctx.orderId",
+            "card": "$ctx.cardNumber",
+            "cardLength": "len($ctx.cardNumber)"
+          },
+          "notify": {
+            "name": "handled",
+            "payload": { "order": "$ctx.orderId", "card": "$ctx.cardNumber" }
+          } }
+      ],
+      "edges": [],
+      "notifications": { "level": "standard", "stream": true }
+    }
+    """;
+
+    /// <summary>
+    /// Four hops, each reading the context. Run with a large context it answers the question the
+    /// envelope raises: does carrying <c>ctx</c> through every node grow the checkpoint per hop?
+    /// </summary>
+    internal const string Wide = """
+    {
+      "dsl": "abacus.workflow/1.0",
+      "name": "dsl-wide",
+      "version": "1.0.0",
+      "start": "one",
+      "output": ["four"],
+      "nodes": [
+        { "id": "one",   "kind": "transform", "set": { "hop": "1", "size": "len($ctx.notes)" } },
+        { "id": "two",   "kind": "transform", "set": { "hop": "2", "size": "$.size" } },
+        { "id": "three", "kind": "transform", "set": { "hop": "3", "size": "$.size" } },
+        { "id": "four",  "kind": "transform",
+          "set": { "hop": "4", "size": "$.size", "order": "$ctx.orderId", "seen": "len($ctx.notes)" } }
+      ],
+      "edges": [
+        { "from": "one", "to": "two" },
+        { "from": "two", "to": "three" },
+        { "from": "three", "to": "four" }
+      ]
+    }
+    """;
+
+    /// <summary>
+    /// Names a registered factory that hands back the wrong executor shape. It registers — the
+    /// catalog knows the name and the parameters check out — and fails when it is built, which is the
+    /// only moment the shape exists to be checked.
+    /// </summary>
+    internal const string WrongShape = """
+    {
+      "dsl": "abacus.workflow/1.0",
+      "name": "dsl-wrong-shape",
+      "version": "1.0.0",
+      "start": "seed",
+      "output": ["broken"],
+      "nodes": [
+        { "id": "seed", "kind": "transform", "set": { "value": "$ctx.amount" } },
+        { "id": "broken", "kind": "custom", "node": "wrong-shape" }
+      ],
+      "edges": [ { "from": "seed", "to": "broken" } ]
+    }
+    """;
+
+    /// <summary>An http node with no allow-list, for a host that enforces egress.</summary>
+    internal const string UnrestrictedHttp = """
+    {
+      "dsl": "abacus.workflow/1.0",
+      "name": "dsl-open-egress",
+      "version": "1.0.0",
+      "start": "call",
+      "output": ["call"],
+      "nodes": [
+        { "id": "call", "kind": "http", "url": "https://anywhere.example/v1/things" }
+      ],
+      "edges": []
+    }
+    """;
+
     internal static IReadOnlyList<(string Name, string Text)> All =>
     [
         ("linear", Linear),
@@ -367,6 +456,9 @@ internal static class DslDocuments
         ("failing", Failing),
         ("audited", Audited),
         ("triggered", Triggered),
-        ("selective-fan-out", SelectiveFanOut)
+        ("selective-fan-out", SelectiveFanOut),
+        ("secret", Secret),
+        ("wide", Wide),
+        ("wrong-shape", WrongShape)
     ];
 }

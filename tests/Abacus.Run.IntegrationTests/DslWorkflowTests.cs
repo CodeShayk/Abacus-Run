@@ -391,6 +391,31 @@ public class DslWorkflowTests : IClassFixture<DslHostFixture>
         result!["value"]!.GetValue<decimal>().Should().Be(21m, "times was 3");
     }
 
+    /// <summary>
+    /// Every edge in a DSL graph carries the envelope, so a factory that returns any other shape is
+    /// refused where the mistake was made rather than breaking the next edge. Validation cannot catch
+    /// it — the shape does not exist until the factory is asked — so the build must, and the run must
+    /// end saying so.
+    /// </summary>
+    [Fact]
+    public async Task A_custom_node_of_the_wrong_shape_fails_the_run_and_names_itself()
+    {
+        using HttpClient client = _fixture.CreateClient();
+
+        string id = await _fixture.StartAsync(client, "dsl-wrong-shape", Context(amount: 1m));
+
+        WorkflowInstance instance = await _fixture.WaitForStatusAsync(
+            id, InstanceStatus.Failed, InstanceStatus.DeadStopped);
+
+        instance.Status.Should().Be(InstanceStatus.DeadStopped,
+            "an interpretation failure is deterministic; retrying it only burns attempts");
+        instance.AttemptCount.Should().BeLessThanOrEqualTo(1);
+
+        instance.TerminalReason.Should().NotBeNull()
+            .And.Subject.As<string>().Should().Contain("wrong-shape")
+            .And.Contain(nameof(DslMessage), "the message should say what shape was required");
+    }
+
     // ---- notifications ---------------------------------------------------------------------------------------
 
     [Fact]

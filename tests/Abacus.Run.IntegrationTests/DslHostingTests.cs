@@ -10,6 +10,9 @@ using Abacus.Run.Dsl.Hosting;
 using Abacus.Run.Dsl.Interpretation;
 using Abacus.Run.Dsl.Validation;
 using FluentAssertions;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
@@ -88,6 +91,68 @@ public class DslRegistrationTests
 
         act.Should().Throw<DslValidationException>()
             .Which.Message.Should().Contain(DslCodes.UnknownCustomNode);
+    }
+
+    /// <summary>
+    /// Egress enforcement is on by default, and the document is where the allow-list has to be
+    /// declared — a host that restricts outbound calls cannot have that decision made for it by
+    /// whoever wrote the JSON.
+    /// </summary>
+    [Fact]
+    public void An_http_node_without_an_allow_list_fails_startup_when_egress_is_enforced()
+    {
+        using ServiceProvider provider = Build(host => host
+            .AddDslWorkflowText(DslDocuments.UnrestrictedHttp, "open.json"));
+
+        Action act = () => provider.GetServices<IWorkflowDefinition>().ToArray();
+
+        act.Should().Throw<DslValidationException>()
+            .Which.Message.Should().Contain(DslCodes.EgressHostsRequired);
+    }
+
+    [Fact]
+    public void An_http_node_that_declares_its_hosts_registers_under_enforcement()
+    {
+        using ServiceProvider provider = Build(host => host
+            .AddDslWorkflowText(DslDocuments.Http, "http.json"));
+
+        Action act = () => provider.GetServices<IWorkflowDefinition>().ToArray();
+        act.Should().NotThrow("the document names the host it calls");
+    }
+
+    /// <summary>
+    /// A host that does not police egress must not have the rule invented for it either. The setting
+    /// is the host's to make, which is why the check is reported as skipped rather than passed when
+    /// there is no environment to ask.
+    /// </summary>
+    [Fact]
+    public void The_same_document_registers_when_the_host_does_not_enforce_egress()
+    {
+        using ServiceProvider provider = Build(host => host
+            .ConfigureDsl(r => r.EnforceEgress = false)
+            .AddDslWorkflowText(DslDocuments.UnrestrictedHttp, "open.json"));
+
+        Action act = () => provider.GetServices<IWorkflowDefinition>().ToArray();
+        act.Should().NotThrow();
+    }
+
+    /// <summary>
+    /// The registered definition reports its own provenance, which is how the catalog can say
+    /// "dsl" without <c>Abacus.Run</c> knowing the DSL exists.
+    /// </summary>
+    [Fact]
+    public void A_registered_document_reports_its_source_and_hash()
+    {
+        using ServiceProvider provider = Build(host => host
+            .ConfigureDsl(r => r.EnforceEgress = false)
+            .AddDslWorkflowText(DslDocuments.Linear, "linear"));
+
+        IWorkflowDefinition definition = provider.GetServices<IWorkflowDefinition>().Single();
+
+        var authored = definition.Should().BeAssignableTo<IDocumentAuthoredWorkflow>().Subject;
+        authored.Source.Should().Be("dsl");
+        authored.DocumentHash.Should().Be(
+            DslCanonicalHash.Compute(JsonNode.Parse(DslDocuments.Linear)!));
     }
 
     /// <summary>A published version is immutable, and two documents claiming one must not both win.</summary>
@@ -418,5 +483,36 @@ public class DslEndpointTests : IClassFixture<DslHostFixture>
 
         result.GetProperty("diagnostics").EnumerateArray().First()
             .GetProperty("pointer").GetString().Should().Be("/");
+    }
+
+    /// <summary>
+    /// Validating a document reflects the host's registered node names back to the caller — not
+    /// secret, but not anonymous either. The DSL routes must therefore be exactly as protected as the
+    /// catalog they describe, so this compares their authorization metadata rather than asserting a
+    /// particular policy: whatever the catalog requires today, the DSL routes require too.
+    /// </summary>
+    [Theory]
+    [InlineData("/dsl/validate")]
+    [InlineData("/dsl/nodes")]
+    [InlineData("/dsl/documents")]
+    [InlineData("/dsl/schema")]
+    [InlineData("/dsl/functions")]
+    public void The_dsl_routes_carry_the_same_authorization_as_the_catalog(string route)
+    {
+        RouteEndpoint[] endpoints = [.. _fixture.Resolve<EndpointDataSource>().Endpoints.OfType<RouteEndpoint>()];
+
+        RouteEndpoint catalog = endpoints.Single(e => e.RoutePattern.RawText == "/workflows");
+        RouteEndpoint dsl = endpoints.Single(e => e.RoutePattern.RawText == route);
+
+        Describe(dsl).Should().BeEquivalentTo(Describe(catalog),
+            $"'{route}' is a control-plane route like any other");
+
+        static (bool Anonymous, string[] Policies) Describe(Endpoint endpoint) =>
+        (
+            endpoint.Metadata.OfType<IAllowAnonymous>().Any(),
+            [.. endpoint.Metadata.OfType<IAuthorizeData>()
+                .Select(a => $"{a.Policy}|{a.Roles}|{a.AuthenticationSchemes}")
+                .Order(StringComparer.Ordinal)]
+        );
     }
 }

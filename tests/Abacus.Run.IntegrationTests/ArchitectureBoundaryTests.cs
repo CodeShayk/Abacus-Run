@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Abacus.Adapters.Messaging.RabbitMQ;
 using Abacus.Adapters.Cache.Redis;
 using Abacus.Run.Abstractions;
@@ -26,6 +27,7 @@ public class ArchitectureBoundaryTests
     private static readonly Assembly Host = typeof(AbacusServiceCollectionExtensions).Assembly;
     private static readonly Assembly RedisAdapter = typeof(RedisNotificationBus).Assembly;
     private static readonly Assembly RabbitMqAdapter = typeof(RabbitMqDomainEventBroker).Assembly;
+    private static readonly Assembly Dsl = typeof(Abacus.Run.Dsl.Interpretation.DslMessage).Assembly;
 
     [Fact]
     public void The_library_and_the_host_are_separate_assemblies()
@@ -265,6 +267,90 @@ public class ArchitectureBoundaryTests
 
         offenders.Should().BeEmpty(
             "extension points outside a declared workflow namespace would mean the shell had grown behaviour of its own");
+    }
+
+    /// <summary>
+    /// The DSL is a second front end onto the framework, not a layer inside it. It sits where an
+    /// adapter sits: above <c>Abacus.Run</c>, below any deployment, and knowing about neither the
+    /// host nor infrastructure.
+    /// </summary>
+    [Fact]
+    public void The_dsl_is_a_front_end_on_the_framework_and_nothing_else_of_ours()
+    {
+        Dsl.GetName().Name.Should().Be("Abacus.Run.Dsl");
+
+        string[] references = [.. Dsl.GetReferencedAssemblies().Select(a => a.Name!)];
+
+        references.Should().Contain("Abacus.Run",
+            "the DSL exists to interpret documents onto the framework's runtime");
+
+        references.Should().NotContain("Abacus.Run.Service",
+            "a front end that referenced a host would be tied to one deployment");
+
+        foreach (string forbidden in new[]
+                 {
+                     "Abacus.Adapters.Cache.Redis", "Abacus.Adapters.Messaging.RabbitMQ",
+                     "Microsoft.EntityFrameworkCore", "StackExchange.Redis", "RabbitMQ.Client"
+                 })
+        {
+            references.Should().NotContain(forbidden,
+                "the DSL declares what runs, never where it is stored or how it is transported");
+        }
+    }
+
+    /// <summary>
+    /// The DSL reaches the framework through the same surface any consumer has. If it needed
+    /// internals, the seams the design leans on — <c>IContextValidatingWorkflow</c>,
+    /// <c>ITemplateBindingSource</c>, <c>IDocumentAuthoredWorkflow</c> — would be missing something,
+    /// and the next front end would have to be written inside <c>Abacus.Run</c> to work at all.
+    /// </summary>
+    [Fact]
+    public void The_dsl_uses_only_the_frameworks_public_surface()
+    {
+        string[] granted = Library.GetCustomAttributes<InternalsVisibleToAttribute>()
+            .Select(a => a.AssemblyName.Split(',')[0])
+            .ToArray();
+
+        granted.Should().NotContain("Abacus.Run.Dsl",
+            "a front end with internals access is a front end whose seams are not really public");
+
+        // The seams themselves, named: each is public, so a third front end has the same reach.
+        typeof(IContextValidatingWorkflow).IsPublic.Should().BeTrue();
+        typeof(IDocumentAuthoredWorkflow).IsPublic.Should().BeTrue();
+        typeof(Abacus.Run.Executors.ITemplateBindingSource).IsPublic.Should().BeTrue();
+        typeof(IContextValidatingWorkflow).Assembly.Should().BeSameAs(Library);
+        typeof(IDocumentAuthoredWorkflow).Assembly.Should().BeSameAs(Library);
+    }
+
+    /// <summary>
+    /// The framework must not know the DSL exists. It reports provenance through an interface it
+    /// declares and the DSL implements, so <c>Abacus.Run</c> names no front end and a host that
+    /// authors every workflow in C# carries neither the schema validator nor the expression parser.
+    /// </summary>
+    [Fact]
+    public void The_framework_does_not_reference_the_dsl()
+    {
+        Library.GetReferencedAssemblies().Select(a => a.Name)
+            .Should().NotContain("Abacus.Run.Dsl");
+
+        Library.GetReferencedAssemblies().Select(a => a.Name)
+            .Should().NotContain("JsonSchema.Net",
+                "the schema validator is the DSL's cost to carry, not every consumer's");
+    }
+
+    /// <summary>
+    /// The schema ships inside the DSL assembly as one embedded resource. Byte equality with the
+    /// published file is asserted in the DSL suite; what belongs here is that there is exactly one
+    /// copy and it travels with the code that enforces it.
+    /// </summary>
+    [Fact]
+    public void The_dsl_carries_the_schema_as_an_embedded_resource()
+    {
+        string[] schemaResources = [.. Dsl.GetManifestResourceNames()
+            .Where(n => n.Contains("workflow-dsl", StringComparison.Ordinal))];
+
+        schemaResources.Should().ContainSingle("one copy, or the published and enforced schemas can drift")
+            .Which.Should().EndWith(".json");
     }
 
     [Fact]

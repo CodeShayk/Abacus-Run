@@ -29,6 +29,7 @@ namespace Abacus.Run.Dsl.Interpretation;
 public class DslWorkflowDefinition
     : IWorkflowDefinition<JsonElement, JsonElement>,
       IContextValidatingWorkflow,
+      IDocumentAuthoredWorkflow,
       INotifyingWorkflow,
       IDomainEventTriggeredWorkflow
 {
@@ -71,6 +72,9 @@ public class DslWorkflowDefinition
 
     /// <summary>The canonical hash of the source document. Identity, and drift detection.</summary>
     public string DocumentHash => Document.Hash;
+
+    /// <summary>Names this front end to the catalog, which cannot name it itself.</summary>
+    public string Source => "dsl";
 
     public NotificationPolicy Notifications => _notifications;
 
@@ -350,6 +354,14 @@ public class DslWorkflowDefinition
     {
         ArgumentNullException.ThrowIfNull(failure);
 
+        // Ahead of the document's own rules, and deliberately not overridable by them: a document
+        // that cannot be interpreted will not interpret on the next attempt either, so retrying
+        // spends the attempt budget to arrive at the same message. The run should stop and say so.
+        if (Contains<DslInterpretationException>(failure.Exception))
+        {
+            return FailureDisposition.DeadStop;
+        }
+
         foreach (DslFailureRule rule in Document.OnFailure.Where(r => Matches(r, failure)))
         {
             return rule.Disposition switch
@@ -361,6 +373,29 @@ public class DslWorkflowDefinition
         }
 
         return DefaultFailureClassifier.Instance.Classify(failure);
+    }
+
+    /// <summary>
+    /// Walks the chain, because a build failure reaches the classifier wrapped — the engine surfaces
+    /// it through whatever the graph construction threw it into.
+    /// </summary>
+    private static bool Contains<T>(Exception? exception) where T : Exception
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is T)
+            {
+                return true;
+            }
+
+            if (current is AggregateException aggregate &&
+                aggregate.InnerExceptions.Any(Contains<T>))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool Matches(DslFailureRule rule, WorkflowFailure failure)
